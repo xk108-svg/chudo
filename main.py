@@ -132,7 +132,7 @@ async def delete_story_from_supabase(story_id: int) -> bool:
     return data is not None
 
 
-# ---------- КНОПКИ ----------
+# ---------- КНОПКИ МОДЕРАЦИИ ----------
 
 def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -147,35 +147,6 @@ def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"reject:{story_id}",
                 ),
             ]
-        ]
-    )
-
-
-def share_keyboard(
-    message_link: str,
-    channel_link: str,
-    bot_link: str,
-) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📣 Поделиться каналом",
-                    url=channel_link,
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📤 Поделиться этой историей",
-                    url=message_link,
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✍️ Поделись своей историей",
-                    url=bot_link,
-                ),
-            ],
         ]
     )
 
@@ -237,21 +208,9 @@ async def cmd_ad(message: Message):
         await message.answer("После /ad напиши текст объявления.")
         return
 
-    sent = await bot.send_message(
+    await bot.send_message(
         CHANNEL_ID,
-        f"📢 Реклама:\n\n{ad_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
-    )
-
-    channel_link = "https://t.me/delis_chudom"
-    message_link = f"{channel_link}/{sent.message_id}"
-    bot_link = "https://t.me/pishiistorii_bot"
-
-    kb = share_keyboard(message_link, channel_link, bot_link)
-
-    await bot.edit_message_reply_markup(
-        chat_id=sent.chat.id,
-        message_id=sent.message_id,
-        reply_markup=kb,
+        f"📢 Реклама:\n\n{ad_text}",
     )
 
     await message.answer("Рекламное сообщение опубликовано в канале ✅")
@@ -260,7 +219,7 @@ async def cmd_ad(message: Message):
 @router.message()
 async def handle_story(message: Message):
     user = message.from_user
-    story_text = message.text
+    story_text = message.text or ""
 
     story = Story(
         id=None,
@@ -272,7 +231,7 @@ async def handle_story(message: Message):
     story_id = await save_story_to_supabase(story)
     story.id = story_id
 
-    await message.answer("История отправлена на модерацию ✅")
+    await message.answer("Ваша история отправлена на модерацию ✅")
 
     if MOD_CHAT_ID:
         supabase_mark = (
@@ -311,25 +270,13 @@ async def cb_approve(call: CallbackQuery):
     else:
         story_text = full_text
 
-    # Публикация истории в канале
-    sent = await bot.send_message(
+    # Публикация истории в канал (реакции задаются настройками канала)
+    await bot.send_message(
         CHANNEL_ID,
-        f"{story_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
+        story_text,
     )
 
-    channel_link = "https://t.me/delis_chudom"
-    message_link = f"{channel_link}/{sent.message_id}"
-    bot_link = "https://t.me/pishiistorii_bot"
-
-    kb_share = share_keyboard(message_link, channel_link, bot_link)
-
-    await bot.edit_message_reply_markup(
-        chat_id=sent.chat.id,
-        message_id=sent.message_id,
-        reply_markup=kb_share,
-    )
-
-    # Удаляем из БД
+    # Удаляем запись из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
