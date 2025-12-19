@@ -113,6 +113,7 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
     payload = {
         "user_id": story.user_id,
         "username": story.username,
+        # ВАЖНО: колонка в Supabase должна называться story (text)
         "story": story.text,
         "status": story.status,
         "type": story.type,
@@ -217,9 +218,6 @@ async def cmd_start(message: Message):
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
-    """
-    Команда для рекламы: /ad текст — публикует рекламный пост в канале.
-    """
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("После /ad напиши текст объявления.")
@@ -238,9 +236,9 @@ async def cmd_ad(message: Message):
 async def handle_story(message: Message):
     user = message.from_user
 
-    # Определяем, текст или фото
+    # Определяем тип: текст или фото
     if message.photo:
-        photo = message.photo[-1]  # самое большое
+        photo = message.photo[-1]
         text = message.caption or ""
         story_type = "photo"
         photo_file_id = photo.file_id
@@ -263,7 +261,6 @@ async def handle_story(message: Message):
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # В канал ничего не шлём, только в чат модерации
     if MOD_CHAT_ID:
         if story_id is not None:
             supabase_mark = f"ID в БД: {story_id}"
@@ -308,7 +305,6 @@ async def cb_approve(call: CallbackQuery):
         await call.message.answer("Ошибка: некорректный ID истории.")
         return
 
-    # Берём исходный текст (для фото caption, для текста text)
     full_text = call.message.caption or call.message.text or ""
     lines = full_text.split("\n")
     if len(lines) > 3:
@@ -316,9 +312,8 @@ async def cb_approve(call: CallbackQuery):
     else:
         story_text = full_text
 
-    # В канал отправляем только историю
+    # Публикация в канал
     if call.message.photo:
-        # есть фото, берём file_id из оригинального сообщения модерации
         photo = call.message.photo[-1]
         await bot.send_photo(
             CHANNEL_ID,
@@ -333,12 +328,11 @@ async def cb_approve(call: CallbackQuery):
             reply_markup=share_your_story_keyboard(),
         )
 
-    # Удаляем запись из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
-    # Обновляем сообщение модерации (учитываем текст/подпись и избегаем "message is not modified")
+    # Обновляем сообщение модерации, избегая "message is not modified"
     suffix = "\n\n✅ Одобрено и опубликовано."
     if full_text.endswith("✅ Одобрено и опубликовано."):
         return
