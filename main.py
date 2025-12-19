@@ -104,7 +104,7 @@ async def supabase_request(
 
 
 async def save_story_to_supabase(story: Story) -> Optional[int]:
-    """Сохраняет историю, возвращает ID записи или None."""
+    """Сохраняет историю, возвращает ID записи или None (в случае ошибки/отключения БД)."""
     if not SUPABASE_ENABLED:
         return None
 
@@ -146,6 +146,21 @@ def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
                     text="❌ Отклонить",
                     callback_data=f"reject:{story_id}",
                 ),
+            ]
+        ]
+    )
+
+
+# ---------- КНОПКА В КАНАЛЕ "ПОДЕЛИСЬ ИСТОРИЕЙ" ----------
+
+def share_your_story_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✍️ Поделись своей историей",
+                    url="https://t.me/pishiistorii_bot",
+                )
             ]
         ]
     )
@@ -211,6 +226,7 @@ async def cmd_ad(message: Message):
     await bot.send_message(
         CHANNEL_ID,
         f"📢 Реклама:\n\n{ad_text}",
+        reply_markup=share_your_story_keyboard(),
     )
 
     await message.answer("Рекламное сообщение опубликовано в канале ✅")
@@ -231,12 +247,15 @@ async def handle_story(message: Message):
     story_id = await save_story_to_supabase(story)
     story.id = story_id
 
-    await message.answer("Ваша история отправлена на модерацию ✅")
+    await message.answer("История отправлена на модерацию ✅")
 
+    # В канал НИЧЕГО не отправляем, только в чат модерации
     if MOD_CHAT_ID:
-        supabase_mark = (
-            f"ID в БД: {story_id}" if story_id is not None else "❌ не сохранилась в БД"
-        )
+        if story_id is not None:
+            supabase_mark = f"ID в БД: {story_id}"
+        else:
+            supabase_mark = "⚠️ Ошибка: история не сохранилась в БД"
+
         text = (
             f"🆕 Новая история\n"
             f"Автор: @{story.username} (id {story.user_id})\n"
@@ -263,6 +282,7 @@ async def cb_approve(call: CallbackQuery):
         await call.message.answer("Ошибка: некорректный ID истории.")
         return
 
+    # В сообщении модерации первые строки — служебные, ниже сама история
     full_text = call.message.text or ""
     lines = full_text.split("\n")
     if len(lines) > 3:
@@ -270,17 +290,19 @@ async def cb_approve(call: CallbackQuery):
     else:
         story_text = full_text
 
-    # Публикация истории в канал (реакции задаются настройками канала)
+    # В канал отправляем ТОЛЬКО текст истории + кнопку "поделись своей историей"
     await bot.send_message(
         CHANNEL_ID,
         story_text,
+        reply_markup=share_your_story_keyboard(),
     )
 
-    # Удаляем запись из Supabase
+    # Удаляем запись из Supabase (если есть ID)
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
+    # В чате модерации помечаем как опубликованное
     await call.message.edit_text(full_text + "\n\n✅ Одобрено и опубликовано.")
 
 
