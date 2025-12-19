@@ -1,7 +1,9 @@
 import asyncio
 import os
+import time
+import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -14,6 +16,15 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 import aiohttp
+
+
+# ---------- НАСТРОЙКИ ПРОЕКТА ----------
+
+ADMIN_USER_ID = 318289611  # твой Telegram ID
+LIMIT_SECONDS = 2 * 24 * 60 * 60  # 2 дня
+
+# user_id -> timestamp последней отправленной истории
+last_story_ts: Dict[int, float] = {}
 
 
 # ---------- МОДЕЛЬ ИСТОРИИ ----------
@@ -113,8 +124,7 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
     payload = {
         "user_id": story.user_id,
         "username": story.username,
-        # ВАЖНО: колонка в Supabase должна называться story (text)
-        "story": story.text,
+        "story": story.text,          # колонка story должна существовать в таблице
         "status": story.status,
         "type": story.type,
         "photo_file_id": story.photo_file_id,
@@ -137,7 +147,7 @@ async def delete_story_from_supabase(story_id: int) -> bool:
     return data is not None
 
 
-# ---------- КНОПКИ ----------
+# ---------- СЛУЖЕБНЫЕ ФУНКЦИИ ----------
 
 def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -167,6 +177,19 @@ def share_your_story_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
+    """
+    Ищет в тексте строку вида '(id 123456789)' и возвращает число.
+    """
+    m = re.search(r"\(id (\d+)\)", text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 # ---------- ТЕКСТЫ ПРИВЕТСТВИЯ ----------
@@ -218,6 +241,9 @@ async def cmd_start(message: Message):
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
+    """
+    Команда для рекламы: /ad текст — публикует рекламный пост в канале.
+    """
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("После /ad напиши текст объявления.")
@@ -236,7 +262,20 @@ async def cmd_ad(message: Message):
 async def handle_story(message: Message):
     user = message.from_user
 
-    # Определяем тип: текст или фото
+    # --- Ограничение: 1 история в 2 дня, кроме админа ---
+    if user.id != ADMIN_USER_ID:
+        now = time.time()
+        last_ts = last_story_ts.get(user.id)
+        if last_ts and now - last_ts < LIMIT_SECONDS:
+            hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
+            await message.answer(
+                "Ты уже делился историей недавно.\n"
+                f"Пожалуйста, приходи с новой историей через примерно {hours_left} ч."
+            )
+            return
+        last_story_ts[user.id] = now
+
+    # --- Определяем тип истории: текст или фото ---
     if message.photo:
         photo = message.photo[-1]
         text = message.caption or ""
@@ -261,6 +300,7 @@ async def handle_story(message: Message):
 
     await message.answer("История отправлена на модерацию ✅")
 
+    # В канал не шлём, только модераторам
     if MOD_CHAT_ID:
         if story_id is not None:
             supabase_mark = f"ID в БД: {story_id}"
@@ -292,7 +332,7 @@ async def handle_story(message: Message):
         print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- ХЕНДЛЕРЫ КНОПОК МОДЕРАЦИИ ----------
+# ---------- ХЕНДЛЕРЫ МОДЕРАЦИИ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
@@ -328,21 +368,30 @@ async def cb_approve(call: CallbackQuery):
             reply_markup=share_your_story_keyboard(),
         )
 
+    # Удаляем запись из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
-    # Обновляем сообщение модерации, избегая "message is not modified"
+    # Уведомляем автора
+    user_id = extract_user_id_from_moderation_text(full_text)
+    if user_id:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="✨ Твоя история прошла модерацию и опубликована в канале. Спасибо, что делишься чудом!",
+            )
+        except Exception as e:
+            print("Cannot notify user:", e)
+
+    # Помечаем сообщение модерации
     suffix = "\n\n✅ Одобрено и опубликовано."
-    if full_text.endswith("✅ Одобрено и опубликовано."):
-        return
-
-    new_text = full_text + suffix
-
-    if call.message.photo:
-        await call.message.edit_caption(new_text)
-    else:
-        await call.message.edit_text(new_text)
+    if not full_text.endswith("✅ Одобрено и опубликовано."):
+        new_text = full_text + suffix
+        if call.message.photo:
+            await call.message.edit_caption(new_text)
+        else:
+            await call.message.edit_text(new_text)
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -360,17 +409,29 @@ async def cb_reject(call: CallbackQuery):
         print("Supabase delete (reject):", deleted)
 
     full_text = call.message.caption or call.message.text or ""
+
+    # Уведомляем автора
+    user_id = extract_user_id_from_moderation_text(full_text)
+    if user_id:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "Твоя история не прошла модерацию и не была опубликована.\n\n"
+                    "Проверь, пожалуйста, чтобы не было политики, брани и оскорблений, "
+                    "и попробуй пересказать её чуть мягче."
+                ),
+            )
+        except Exception as e:
+            print("Cannot notify user:", e)
+
     suffix = "\n\n❌ Отклонено."
-
-    if full_text.endswith("❌ Отклонено."):
-        return
-
-    new_text = full_text + suffix
-
-    if call.message.photo:
-        await call.message.edit_caption(new_text)
-    else:
-        await call.message.edit_text(new_text)
+    if not full_text.endswith("❌ Отклонено."):
+        new_text = full_text + suffix
+        if call.message.photo:
+            await call.message.edit_caption(new_text)
+        else:
+            await call.message.edit_text(new_text)
 
 
 # ---------- ЗАПУСК ----------
