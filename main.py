@@ -25,6 +25,8 @@ class Story:
     username: str
     text: str
     status: str = "pending"
+    type: str = "text"  # "text" или "photo"
+    photo_file_id: Optional[str] = None
 
 
 # ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
@@ -104,7 +106,7 @@ async def supabase_request(
 
 
 async def save_story_to_supabase(story: Story) -> Optional[int]:
-    """Сохраняет историю, возвращает ID записи или None (в случае ошибки/отключения БД)."""
+    """Сохраняет историю, возвращает ID записи или None."""
     if not SUPABASE_ENABLED:
         return None
 
@@ -113,6 +115,8 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
         "username": story.username,
         "story": story.text,
         "status": story.status,
+        "type": story.type,
+        "photo_file_id": story.photo_file_id,
     }
     data = await supabase_request("POST", "/rest/v1/stories", json=payload)
     if not data:
@@ -132,7 +136,7 @@ async def delete_story_from_supabase(story_id: int) -> bool:
     return data is not None
 
 
-# ---------- КНОПКИ МОДЕРАЦИИ ----------
+# ---------- КНОПКИ ----------
 
 def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -150,8 +154,6 @@ def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-
-# ---------- КНОПКА В КАНАЛЕ "ПОДЕЛИСЬ ИСТОРИЕЙ" ----------
 
 def share_your_story_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -235,13 +237,25 @@ async def cmd_ad(message: Message):
 @router.message()
 async def handle_story(message: Message):
     user = message.from_user
-    story_text = message.text or ""
+
+    # Определяем, текст или фото
+    if message.photo:
+        photo = message.photo[-1]  # самое большое
+        text = message.caption or ""
+        story_type = "photo"
+        photo_file_id = photo.file_id
+    else:
+        text = message.text or ""
+        story_type = "text"
+        photo_file_id = None
 
     story = Story(
         id=None,
         user_id=user.id,
         username=user.username or "anon",
-        text=story_text,
+        text=text,
+        type=story_type,
+        photo_file_id=photo_file_id,
     )
 
     story_id = await save_story_to_supabase(story)
@@ -249,22 +263,34 @@ async def handle_story(message: Message):
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # В канал НИЧЕГО не отправляем, только в чат модерации
+    # В канал ничего не шлём, только в чат модерации
     if MOD_CHAT_ID:
         if story_id is not None:
             supabase_mark = f"ID в БД: {story_id}"
         else:
             supabase_mark = "⚠️ Ошибка: история не сохранилась в БД"
 
-        text = (
+        header = (
             f"🆕 Новая история\n"
             f"Автор: @{story.username} (id {story.user_id})\n"
             f"{supabase_mark}\n\n"
-            f"{story.text}"
         )
 
         kb = moderation_keyboard(story_id or 0)
-        await bot.send_message(MOD_CHAT_ID, text, reply_markup=kb)
+
+        if story_type == "photo" and photo_file_id:
+            await bot.send_photo(
+                MOD_CHAT_ID,
+                photo=photo_file_id,
+                caption=header + text,
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                MOD_CHAT_ID,
+                header + text,
+                reply_markup=kb,
+            )
     else:
         print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
@@ -282,28 +308,47 @@ async def cb_approve(call: CallbackQuery):
         await call.message.answer("Ошибка: некорректный ID истории.")
         return
 
-    # В сообщении модерации первые строки — служебные, ниже сама история
-    full_text = call.message.text or ""
+    # Берём исходный текст (для фото caption, для текста text)
+    full_text = call.message.caption or call.message.text or ""
     lines = full_text.split("\n")
     if len(lines) > 3:
         story_text = "\n".join(lines[3:])
     else:
         story_text = full_text
 
-    # В канал отправляем ТОЛЬКО текст истории + кнопку "поделись своей историей"
-    await bot.send_message(
-        CHANNEL_ID,
-        story_text,
-        reply_markup=share_your_story_keyboard(),
-    )
+    # В канал отправляем только историю
+    if call.message.photo:
+        # есть фото, берём file_id из оригинального сообщения модерации
+        photo = call.message.photo[-1]
+        await bot.send_photo(
+            CHANNEL_ID,
+            photo=photo.file_id,
+            caption=story_text,
+            reply_markup=share_your_story_keyboard(),
+        )
+    else:
+        await bot.send_message(
+            CHANNEL_ID,
+            story_text,
+            reply_markup=share_your_story_keyboard(),
+        )
 
-    # Удаляем запись из Supabase (если есть ID)
+    # Удаляем запись из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
-    # В чате модерации помечаем как опубликованное
-    await call.message.edit_text(full_text + "\n\n✅ Одобрено и опубликовано.")
+    # Обновляем сообщение модерации (учитываем текст/подпись и избегаем "message is not modified")
+    suffix = "\n\n✅ Одобрено и опубликовано."
+    if full_text.endswith("✅ Одобрено и опубликовано."):
+        return
+
+    new_text = full_text + suffix
+
+    if call.message.photo:
+        await call.message.edit_caption(new_text)
+    else:
+        await call.message.edit_text(new_text)
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -320,8 +365,18 @@ async def cb_reject(call: CallbackQuery):
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete (reject):", deleted)
 
-    full_text = call.message.text or ""
-    await call.message.edit_text(full_text + "\n\n❌ Отклонено.")
+    full_text = call.message.caption or call.message.text or ""
+    suffix = "\n\n❌ Отклонено."
+
+    if full_text.endswith("❌ Отклонено."):
+        return
+
+    new_text = full_text + suffix
+
+    if call.message.photo:
+        await call.message.edit_caption(new_text)
+    else:
+        await call.message.edit_text(new_text)
 
 
 # ---------- ЗАПУСК ----------
