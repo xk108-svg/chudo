@@ -13,6 +13,12 @@ from supabase import create_client, Client
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+import os
+
+print("ENV BOT_TOKEN:", os.getenv("BOT_TOKEN"))
+print("ENV MOD_CHAT_ID:", os.getenv("MOD_CHAT_ID"))
+print("ENV CHANNEL_ID:", os.getenv("CHANNEL_ID"))
+
 MOD_CHAT_ID = int(os.getenv("MOD_CHAT_ID"))      # id чата модерации
 CHANNEL_ID = os.getenv("CHANNEL_ID")            # @username или numeric id канала
 
