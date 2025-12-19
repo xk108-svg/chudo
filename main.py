@@ -70,7 +70,9 @@ dp.include_router(router)
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ SUPABASE ----------
 
-async def supabase_request(method: str, path: str, json: Optional[dict] = None, params: Optional[dict] = None):
+async def supabase_request(method: str, path: str,
+                           json: Optional[dict] = None,
+                           params: Optional[dict] = None):
     if not SUPABASE_ENABLED:
         return None
 
@@ -84,8 +86,14 @@ async def supabase_request(method: str, path: str, json: Optional[dict] = None, 
         headers["Prefer"] = "return=representation"
 
     async with aiohttp.ClientSession() as session:
-        async with session.request(method, url, headers=headers, json=json, params=params) as resp:
-            data = await resp.json(content_type=None)
+        async with session.request(method, url,
+                                   headers=headers,
+                                   json=json,
+                                   params=params) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = await resp.text()
             if resp.status >= 400:
                 print(f"Supabase error {resp.status}: {data}")
                 return None
@@ -93,9 +101,6 @@ async def supabase_request(method: str, path: str, json: Optional[dict] = None, 
 
 
 async def save_story_to_supabase(story: Story) -> Optional[int]:
-    """
-    Сохраняет историю, возвращает ID записи или None.
-    """
     if not SUPABASE_ENABLED:
         return None
 
@@ -108,8 +113,6 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
     data = await supabase_request("POST", "/rest/v1/stories", json=payload)
     if not data:
         return None
-
-    # Supabase вернет список вставленных строк
     try:
         return data[0]["id"]
     except Exception as e:
@@ -120,13 +123,12 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
 async def delete_story_from_supabase(story_id: int) -> bool:
     if not SUPABASE_ENABLED:
         return False
-
     params = {"id": f"eq.{story_id}"}
     data = await supabase_request("DELETE", "/rest/v1/stories", params=params)
     return data is not None
 
 
-# ---------- КНОПКИ МОДЕРАЦИИ ----------
+# ---------- КНОПКИ ----------
 
 def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -145,29 +147,105 @@ def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def share_keyboard(message_link: str, channel_link: str) -> InlineKeyboardMarkup:
+    """
+    message_link — ссылка на конкретный пост в канале;
+    channel_link — ссылка на канал вида https://t.me/your_channel.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📣 Поделиться каналом",
+                    url=channel_link,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📤 Поделиться этой историей",
+                    url=message_link,
+                )
+            ],
+        ]
+    )
+
+
+# ---------- ТЕКСТЫ ПРИВЕТСТВИЯ ----------
+
+START_MSG_1 = (
+    "Добро пожаловать, путник истории.\n"
+    "Здесь, как в храме слова, каждый рассказ — маленькое чудо, "
+    "которое может согреть чьё‑то сердце. "
+    "Поделись тем, что пережил, видел или понял — и пусть это послужит другим."
+)
+
+START_MSG_2 = (
+    "Перед тем как начать, давай позаботимся о чистоте речи:\n"
+    "• без политики и споров о власти;\n"
+    "• без брани и грубых выражений;\n"
+    "• без осуждения, насмешек и оскорблений;\n"
+    "• без пропаганды насилия, зависимостей и нечестных поступков.\n\n"
+    "Пусть каждое слово будет таким, за которое не стыдно ни перед совестью, "
+    "ни перед Богом."
+)
+
+START_MSG_3 = (
+    "Пиши так, как будто рассказываешь историю перед алтарём:\n"
+    "со стремлением к добру, милосердию и свету.\n"
+    "Даже если ты описываешь боль или падения, "
+    "постарайся завершить рассказ лучом надежды — "
+    "уроком, выводом, шагом к очищению сердца."
+)
+
+START_MSG_4 = (
+    "В конце истории ты можешь добавить до двух хештегов для поиска.\n"
+    "Например:\n"
+    "#семья #чудо\n"
+    "или\n"
+    "#исцеление #путькБогу\n\n"
+    "Хештеги ставь в самом низу сообщения, слитно, без пробелов внутри."
+)
+
+
 # ---------- ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ ----------
 
 @router.message(F.text == "/start")
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! 📝 Отправь свою историю одним сообщением.\n"
-        "Я передам её на модерацию и, если все ок, опубликую в канале."
-    )
+    await message.answer(START_MSG_1)
+    await message.answer(START_MSG_2)
+    await message.answer(START_MSG_3)
+    await message.answer(START_MSG_4)
+    # При желании можно добавить финальную подсказку:
+    # await message.answer("Теперь просто напиши свою историю одним сообщением.")
 
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
     """
-    Твоя команда для рекламы: в личке/модерационном чате пишешь
-    /ad текст рекламы
-    и бот публикует это в канал.
+    Команда для рекламы: /ad текст.
+    Публикует рекламный пост в канале.
     """
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("После /ad напиши текст объявления.")
         return
 
-    await bot.send_message(CHANNEL_ID, f"📢 Реклама:\n\n{ad_text}")
+    sent = await bot.send_message(
+        CHANNEL_ID,
+        f"📢 Реклама:\n\n{ad_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
+    )
+
+    # если у канала есть публичный @username — можешь указать его здесь
+    channel_link = "https://t.me/your_channel_username"
+    message_link = f"{channel_link}/{sent.message_id}"
+
+    kb = share_keyboard(message_link, channel_link)
+    await bot.edit_message_reply_markup(
+        chat_id=sent.chat.id,
+        message_id=sent.message_id,
+        reply_markup=kb,
+    )
+
     await message.answer("Рекламное сообщение опубликовано в канале ✅")
 
 
@@ -183,13 +261,11 @@ async def handle_story(message: Message):
         text=story_text,
     )
 
-    # сохраняем в Supabase
     story_id = await save_story_to_supabase(story)
     story.id = story_id
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # отправляем модераторам
     if MOD_CHAT_ID:
         supabase_mark = (
             f"ID в БД: {story_id}" if story_id is not None else "❌ не сохранилась в БД"
@@ -220,26 +296,35 @@ async def cb_approve(call: CallbackQuery):
         await call.message.answer("Ошибка: некорректный ID истории.")
         return
 
-    # текст истории = текст сообщения без первой строки/метаданных
-    # предполагаем формат как выше
     full_text = call.message.text or ""
-    # можно сразу публиковать всё сообщение или только часть после метаданных
-    # упрощённо публикуем всё, кроме первых трёх строк:
     lines = full_text.split("\n")
     if len(lines) > 3:
         story_text = "\n".join(lines[3:])
     else:
         story_text = full_text
 
-    # публикуем в канал
-    await bot.send_message(CHANNEL_ID, story_text)
+    # Публикация истории в канале
+    sent = await bot.send_message(
+        CHANNEL_ID,
+        f"{story_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
+    )
 
-    # удаляем из Supabase, если есть id
+    # Ссылки для кнопок "Поделиться"
+    channel_link = "https://t.me/your_channel_username"
+    message_link = f"{channel_link}/{sent.message_id}"
+
+    kb_share = share_keyboard(message_link, channel_link)
+    await bot.edit_message_reply_markup(
+        chat_id=sent.chat.id,
+        message_id=sent.message_id,
+        reply_markup=kb_share,
+    )
+
+    # Удаляем из БД
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
-    # отмечаем в модерационном чате
     await call.message.edit_text(full_text + "\n\n✅ Одобрено и опубликовано.")
 
 
