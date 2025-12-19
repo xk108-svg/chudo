@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 import aiohttp
 
+
 # ---------- МОДЕЛЬ ИСТОРИИ ----------
 
 @dataclass
@@ -70,9 +71,12 @@ dp.include_router(router)
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ SUPABASE ----------
 
-async def supabase_request(method: str, path: str,
-                           json: Optional[dict] = None,
-                           params: Optional[dict] = None):
+async def supabase_request(
+    method: str,
+    path: str,
+    json: Optional[dict] = None,
+    params: Optional[dict] = None,
+):
     if not SUPABASE_ENABLED:
         return None
 
@@ -86,10 +90,9 @@ async def supabase_request(method: str, path: str,
         headers["Prefer"] = "return=representation"
 
     async with aiohttp.ClientSession() as session:
-        async with session.request(method, url,
-                                   headers=headers,
-                                   json=json,
-                                   params=params) as resp:
+        async with session.request(
+            method, url, headers=headers, json=json, params=params
+        ) as resp:
             try:
                 data = await resp.json(content_type=None)
             except Exception:
@@ -101,6 +104,7 @@ async def supabase_request(method: str, path: str,
 
 
 async def save_story_to_supabase(story: Story) -> Optional[int]:
+    """Сохраняет историю, возвращает ID записи или None."""
     if not SUPABASE_ENABLED:
         return None
 
@@ -147,24 +151,30 @@ def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def share_keyboard(message_link: str, channel_link: str) -> InlineKeyboardMarkup:
-    """
-    message_link — ссылка на конкретный пост в канале;
-    channel_link — ссылка на канал вида https://t.me/your_channel.
-    """
+def share_keyboard(
+    message_link: str,
+    channel_link: str,
+    bot_link: str,
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="📣 Поделиться каналом",
                     url=channel_link,
-                )
+                ),
             ],
             [
                 InlineKeyboardButton(
                     text="📤 Поделиться этой историей",
                     url=message_link,
-                )
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Поделись своей историей",
+                    url=bot_link,
+                ),
             ],
         ]
     )
@@ -215,15 +225,12 @@ async def cmd_start(message: Message):
     await message.answer(START_MSG_2)
     await message.answer(START_MSG_3)
     await message.answer(START_MSG_4)
-    # При желании можно добавить финальную подсказку:
-    # await message.answer("Теперь просто напиши свою историю одним сообщением.")
 
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
     """
-    Команда для рекламы: /ad текст.
-    Публикует рекламный пост в канале.
+    Команда для рекламы: /ad текст — публикует рекламный пост в канале.
     """
     ad_text = message.text[4:].strip()
     if not ad_text:
@@ -235,11 +242,12 @@ async def cmd_ad(message: Message):
         f"📢 Реклама:\n\n{ad_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
     )
 
-    # если у канала есть публичный @username — можешь указать его здесь
-    channel_link = "https://t.me/your_channel_username"
+    channel_link = "https://t.me/delis_chudom"
     message_link = f"{channel_link}/{sent.message_id}"
+    bot_link = "https://t.me/pishiistorii_bot"
 
-    kb = share_keyboard(message_link, channel_link)
+    kb = share_keyboard(message_link, channel_link, bot_link)
+
     await bot.edit_message_reply_markup(
         chat_id=sent.chat.id,
         message_id=sent.message_id,
@@ -309,11 +317,12 @@ async def cb_approve(call: CallbackQuery):
         f"{story_text}\n\nОцените историю: 👍 ❤️ 🔥 🙏",
     )
 
-    # Ссылки для кнопок "Поделиться"
-    channel_link = "https://t.me/your_channel_username"
+    channel_link = "https://t.me/delis_chudom"
     message_link = f"{channel_link}/{sent.message_id}"
+    bot_link = "https://t.me/pishiistorii_bot"
 
-    kb_share = share_keyboard(message_link, channel_link)
+    kb_share = share_keyboard(message_link, channel_link, bot_link)
+
     await bot.edit_message_reply_markup(
         chat_id=sent.chat.id,
         message_id=sent.message_id,
