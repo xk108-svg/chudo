@@ -323,24 +323,17 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ПОЛНЫЙ ХЕНДЛЕР ИСТОРИЙ С ИСКЛЮЧЕНИЯМИ
+# ✅ ПРАВИЛЬНЫЙ ХЕНДЛЕР ИСТОРИЙ - АДМИН МОЖЕТ ТЕСТИРОВАТЬ
 @router.message(F.photo & ~F.reply_to_message)
 @router.message(F.text & ~F.text.startswith("/ad") & ~F.text == "/start")
 async def handle_story(message: Message):
     """
-    ✅ НЕ ЛОВИТ:
-    * reply на фото (реклама)
-    * команды /ad 
-    * /start
-    * АДМИНА (ты публикуешь свободно!)
+    ✅ ЛОВИТ ВСЕ ИСТОРИИ ОТ ПОЛЬЗОВАТЕЛЕЙ И АДМИНА (для тестов)
+    ✅ НЕ ЛОВИТ: reply'и, /ad, /start
     """
-    # ✅ АДМИН ПОЛНАЯ СВОБОДА - твои посты игнорируются
-    if message.from_user.id == ADMIN_USER_ID:
-        return
-        
     user = message.from_user
 
-    # --- Ограничение: 1 история в 2 дня, кроме админа ---
+    # --- Ограничение: 1 история в 2 дня, ТОЛЬКО для не-админов ---
     if user.id != ADMIN_USER_ID:
         now = time.time()
         last_ts = last_story_ts.get(user.id)
