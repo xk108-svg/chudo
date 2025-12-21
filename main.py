@@ -179,26 +179,6 @@ def share_your_story_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def ad_keyboard(url: str = "https://example.com") -> InlineKeyboardMarkup:
-    """Клавиатура для рекламы"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔥 Перейти на сайт", 
-                    url=url
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✍️ Поделись своей историей",
-                    url="https://t.me/pishiistorii_bot",
-                )
-            ]
-        ]
-    )
-
-
 def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
     """
     Ищет в тексте строку вида '(id 123456789)' и возвращает число.
@@ -223,7 +203,7 @@ START_MSG_1 = (
 
 START_MSG_2 = (
     "Перед тем как начать, давай позаботимся о чистоте речи:\n"
-    "• без политики и споров о власти;\n"
+    "• без политики и споров о властью;\n"
     "• без брани и грубых выражений;\n"
     "• без осуждения, насмешек и оскорблений;\n"
     "• без пропаганды насилия, зависимостей и нечестных поступков.\n\n"
@@ -262,7 +242,7 @@ async def cmd_start(message: Message):
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
     """
-    ✅ ПРИОРИТЕТНЫЙ ХЕНДЛЕР РЕКЛАМЫ - ЛОВИТ ПЕРВЫМ!
+    ✅ РЕКЛАМА БЕЗ ЛИШНЕЙ КНОПКИ + КАРТИНКА ОДНИМ ПОСТОМ
     """
     # Reply на фото для рекламы с картинкой
     if message.reply_to_message and message.reply_to_message.photo:
@@ -273,31 +253,35 @@ async def cmd_ad(message: Message):
             await message.answer("❌ После /ad напиши текст объявления.")
             return
             
-        # ✅ ПУБЛИКУЕМ ЧИСТУЮ РЕКЛАМУ В КАНАЛ
+        # ✅ РЕКЛАМА С КАРТИНКОЙ - ТОЛЬКО "Поделись историей"
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo.file_id,
             caption=f"📢 <b>Реклама</b>\n\n{ad_text}",
-            reply_markup=ad_keyboard(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✍️ Поделись своей историей",
+                    url="https://t.me/pishiistorii_bot"
+                )]
+            ]),
         )
         
-        # ✅ ПОЛНАЯ ЧИСТКА СЛЕДОВ
+        # Чистка следов
         try:
-            await message.reply_to_message.delete()  # удаляем фото
-            await message.delete()                   # удаляем /ad
+            await message.reply_to_message.delete()
+            await message.delete()
         except:
             pass
             
-        # ✅ Подтверждение самоуничтожается
-        confirm = await message.answer("✅ Реклама опубликована в канале!")
+        confirm = await message.answer("✅ Реклама опубликована!")
         await asyncio.sleep(3)
         try:
             await confirm.delete()
         except:
             pass
-        return  # ✅ ВАЖНО: выходим сразу!
+        return
 
-    # Текстовая реклама
+    # Текстовая реклама - ТОЛЬКО "Поделись историей"
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("❌ После /ad напиши текст объявления.")
@@ -306,7 +290,12 @@ async def cmd_ad(message: Message):
     await bot.send_message(
         CHANNEL_ID,
         f"📢 <b>Реклама</b>\n\n{ad_text}",
-        reply_markup=ad_keyboard(),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✍️ Поделись своей историей",
+                url="https://t.me/pishiistorii_bot"
+            )]
+        ]),
     )
     
     try:
@@ -314,8 +303,7 @@ async def cmd_ad(message: Message):
     except:
         pass
     
-    # Подтверждение самоуничтожается
-    confirm = await message.answer("✅ Реклама опубликована в канале!")
+    confirm = await message.answer("✅ Реклама опубликована!")
     await asyncio.sleep(3)
     try:
         await confirm.delete()
@@ -323,7 +311,7 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ✅ ✅ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
+# ✅ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
 @router.message(
     (F.photo & ~F.reply_to_message) | 
     (F.text & ~F.text.startswith(("/ad", "/start")))
@@ -411,7 +399,7 @@ async def handle_story(message: Message):
         print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- ✅ ИСПРАВЛЕННЫЙ ХЕНДЛЕР МОДЕРАЦИИ ----------
+# ---------- ИСПРАВЛЕННЫЙ ХЕНДЛЕР МОДЕРАЦИИ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
