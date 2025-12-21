@@ -124,7 +124,7 @@ async def save_story_to_supabase(story: Story) -> Optional[int]:
     payload = {
         "user_id": story.user_id,
         "username": story.username,
-        "story": story.text,          # колонка story должна существовать в таблице
+        "story": story.text,          
         "status": story.status,
         "type": story.type,
         "photo_file_id": story.photo_file_id,
@@ -179,6 +179,26 @@ def share_your_story_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def ad_keyboard(url: str = "https://example.com") -> InlineKeyboardMarkup:
+    """Клавиатура для рекламы"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔥 Перейти на сайт", 
+                    url=url
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Поделись своей историей",
+                    url="https://t.me/pishiistorii_bot",
+                )
+            ]
+        ]
+    )
+
+
 def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
     """
     Ищет в тексте строку вида '(id 123456789)' и возвращает число.
@@ -197,7 +217,7 @@ def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
 START_MSG_1 = (
     "Добро пожаловать, путник истории.\n"
     "Здесь, как в храме слова, каждый рассказ — маленькое чудо, "
-    "которое может согреть чьё‑то сердце. "
+    "которое может согреть чь‑то сердце. "
     "Поделись тем, что пережил, видел или понял — и пусть это послужит другим."
 )
 
@@ -242,24 +262,77 @@ async def cmd_start(message: Message):
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
     """
-    Команда для рекламы: /ad текст — публикует рекламный пост в канале.
+    ✅ ПРИОРИТЕТНЫЙ ХЕНДЛЕР РЕКЛАМЫ - ЛОВИТ ПЕРВЫМ!
     """
+    # Reply на фото для рекламы с картинкой
+    if message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1]
+        ad_text = message.text[4:].strip()
+        
+        if not ad_text:
+            await message.answer("❌ После /ad напиши текст объявления.")
+            return
+            
+        # ✅ ПУБЛИКУЕМ ЧИСТУЮ РЕКЛАМУ В КАНАЛ
+        await bot.send_photo(
+            CHANNEL_ID,
+            photo=photo.file_id,
+            caption=f"📢 <b>Реклама</b>\n\n{ad_text}",
+            reply_markup=ad_keyboard(),
+        )
+        
+        # ✅ ПОЛНАЯ ЧИСТКА СЛЕДОВ
+        try:
+            await message.reply_to_message.delete()  # удаляем фото
+            await message.delete()                   # удаляем /ad
+        except:
+            pass
+            
+        # ✅ Подтверждение самоуничтожается
+        confirm = await message.answer("✅ Реклама опубликована в канале!")
+        await asyncio.sleep(3)
+        try:
+            await confirm.delete()
+        except:
+            pass
+        return  # ✅ ВАЖНО: выходим сразу!
+
+    # Текстовая реклама
     ad_text = message.text[4:].strip()
     if not ad_text:
-        await message.answer("После /ad напиши текст объявления.")
+        await message.answer("❌ После /ad напиши текст объявления.")
         return
 
     await bot.send_message(
         CHANNEL_ID,
-        f"📢 Реклама:\n\n{ad_text}",
-        reply_markup=share_your_story_keyboard(),
+        f"📢 <b>Реклама</b>\n\n{ad_text}",
+        reply_markup=ad_keyboard(),
     )
+    
+    try:
+        await message.delete()
+    except:
+        pass
+    
+    # Подтверждение самоуничтожается
+    confirm = await message.answer("✅ Реклама опубликована в канале!")
+    await asyncio.sleep(3)
+    try:
+        await confirm.delete()
+    except:
+        pass
 
-    await message.answer("Рекламное сообщение опубликовано в канале ✅")
 
-
-@router.message()
+# ✅ ИСПРАВЛЕННЫЙ ХЕНДЛЕР ИСТОРИЙ - ЛОВИТ ТОЛЬКО ЧТО НЕ РЕКЛАМА
+@router.message(F.photo & ~F.reply_to_message)
+@router.message(F.text & ~F.text.startswith("/ad") & ~F.text == "/start")
 async def handle_story(message: Message):
+    """
+    ✅ НЕ ЛОВИТ:
+    * reply на фото (реклама)
+    * команды /ad 
+    * /start
+    """
     user = message.from_user
 
     # --- Ограничение: 1 история в 2 дня, кроме админа ---
