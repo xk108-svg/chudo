@@ -323,20 +323,21 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ✅ ✅ ИСПРАВЛЕННЫЙ ХЕНДЛЕР — ЛОВИТ ФОТО И ТЕКСТ!
+# ✅ ✅ ✅ НОВЫЙ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
 @router.message(
     (F.photo & ~F.reply_to_message) | 
     (F.text & ~F.text.startswith(("/ad", "/start")))
 )
 async def handle_story(message: Message):
     """
-    ✅ ЛОВИТ: 
-    * фото БЕЗ reply_to_message
-    * текст НЕ /ad НЕ /start
+    ✅ ЛОВИТ ВСЁ ОТ ТЕБЯ И ПОЛЬЗОВАТЕЛЕЙ:
+    * Фото без текста (ты отклоняешь ❌)
+    * Фото + текст  
+    * Просто текст
     """
     user = message.from_user
 
-    # --- Ограничение: 1 история в 2 дня, ТОЛЬКО для не-админов ---
+    # Ограничение ТОЛЬКО для пользователей (ты без лимита)
     if user.id != ADMIN_USER_ID:
         now = time.time()
         last_ts = last_story_ts.get(user.id)
@@ -349,8 +350,11 @@ async def handle_story(message: Message):
             return
         last_story_ts[user.id] = now
 
-    # --- Определяем тип истории: текст или фото ---
-    if message.photo:
+    # Определяем тип контента
+    has_photo = message.photo is not None
+    has_text = (message.text is not None) or (message.caption is not None)
+    
+    if has_photo:
         photo = message.photo[-1]
         text = message.caption or ""
         story_type = "photo"
@@ -370,26 +374,27 @@ async def handle_story(message: Message):
     )
 
     story_id = await save_story_to_supabase(story)
-    story.id = story_id
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # В канал не шлём, только модераторам
+    # Шлём модераторам ВСЕ истории
     if MOD_CHAT_ID:
-        if story_id is not None:
-            supabase_mark = f"ID в БД: {story_id}"
-        else:
-            supabase_mark = "⚠️ Ошибка: история не сохранилась в БД"
-
+        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
+        
+        # Показываем тип контента
+        content_type = "📷 Только фото" if has_photo and not has_text else \
+                      "📷 Фото + текст" if has_photo else "📝 Текст"
+        
         header = (
             f"🆕 Новая история\n"
+            f"Тип: {content_type}\n"
             f"Автор: @{story.username} (id {story.user_id})\n"
             f"{supabase_mark}\n\n"
         )
 
         kb = moderation_keyboard(story_id or 0)
 
-        if story_type == "photo" and photo_file_id:
+        if story_type == "photo":
             await bot.send_photo(
                 MOD_CHAT_ID,
                 photo=photo_file_id,
@@ -421,8 +426,8 @@ async def cb_approve(call: CallbackQuery):
 
     full_text = call.message.caption or call.message.text or ""
     lines = full_text.split("\n")
-    if len(lines) > 3:
-        story_text = "\n".join(lines[3:])
+    if len(lines) > 4:  # пропускаем 4 строки заголовка
+        story_text = "\n".join(lines[4:])
     else:
         story_text = full_text
 
