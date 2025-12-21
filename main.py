@@ -323,7 +323,7 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ✅ ✅ НОВЫЙ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
+# ✅ ✅ ✅ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
 @router.message(
     (F.photo & ~F.reply_to_message) | 
     (F.text & ~F.text.startswith(("/ad", "/start")))
@@ -411,7 +411,7 @@ async def handle_story(message: Message):
         print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- ХЕНДЛЕРЫ МОДЕРАЦИИ ----------
+# ---------- ✅ ИСПРАВЛЕННЫЙ ХЕНДЛЕР МОДЕРАЦИИ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
@@ -425,13 +425,17 @@ async def cb_approve(call: CallbackQuery):
         return
 
     full_text = call.message.caption or call.message.text or ""
+    
+    # ✅ УМНАЯ ОЧИСТКА ЗАГОЛОВКА — убираем всё до текста истории
     lines = full_text.split("\n")
-    if len(lines) > 4:  # пропускаем 4 строки заголовка
-        story_text = "\n".join(lines[4:])
-    else:
-        story_text = full_text
+    # Пропускаем заголовок (5 строк: 🆕, Тип, Автор, ID, пустая строка)
+    story_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
+    
+    # Если текста нет (только фото) — публикуем БЕЗ подписи
+    if not story_text:
+        story_text = None
 
-    # Публикация в канал
+    # ✅ ПУБЛИКАЦИЯ ЧИСТЫМ КОНТЕНТОМ
     if call.message.photo:
         photo = call.message.photo[-1]
         await bot.send_photo(
@@ -443,7 +447,7 @@ async def cb_approve(call: CallbackQuery):
     else:
         await bot.send_message(
             CHANNEL_ID,
-            story_text,
+            story_text or " ",
             reply_markup=share_your_story_keyboard(),
         )
 
