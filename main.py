@@ -323,13 +323,16 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ПРАВИЛЬНЫЙ ХЕНДЛЕР ИСТОРИЙ - АДМИН МОЖЕТ ТЕСТИРОВАТЬ
-@router.message(F.photo & ~F.reply_to_message)
-@router.message(F.text & ~F.text.startswith("/ad") & ~F.text == "/start")
+# ✅ ✅ ✅ ИСПРАВЛЕННЫЙ ХЕНДЛЕР — ЛОВИТ ФОТО И ТЕКСТ!
+@router.message(
+    (F.photo & ~F.reply_to_message) | 
+    (F.text & ~F.text.startswith(("/ad", "/start")))
+)
 async def handle_story(message: Message):
     """
-    ✅ ЛОВИТ ВСЕ ИСТОРИИ ОТ ПОЛЬЗОВАТЕЛЕЙ И АДМИНА (для тестов)
-    ✅ НЕ ЛОВИТ: reply'и, /ad, /start
+    ✅ ЛОВИТ: 
+    * фото БЕЗ reply_to_message
+    * текст НЕ /ad НЕ /start
     """
     user = message.from_user
 
