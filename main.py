@@ -9,6 +9,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -27,6 +29,16 @@ LIMIT_SECONDS = 2 * 24 * 60 * 60  # 2 дня
 last_story_ts: Dict[int, float] = {}
 
 
+# ---------- FSM СОСТОЯНИЯ ----------
+
+class LongStory(StatesGroup):
+    title = State()
+    part1 = State()
+    part2 = State()
+    part3 = State()
+    photo = State()
+
+
 # ---------- МОДЕЛЬ ИСТОРИИ ----------
 
 @dataclass
@@ -36,7 +48,7 @@ class Story:
     username: str
     text: str
     status: str = "pending"
-    type: str = "text"  # "text" или "photo"
+    type: str = "text"  # "text", "photo", "long_story"
     photo_file_id: Optional[str] = None
 
 
@@ -203,7 +215,7 @@ START_MSG_1 = (
 
 START_MSG_2 = (
     "Перед тем как начать, давай позаботимся о чистоте речи:\n"
-    "• без политики и споров о властью;\n"
+    "• без политики и споров о власти;\n"
     "• без брани и грубых выражений;\n"
     "• без осуждения, насмешек и оскорблений;\n"
     "• без пропаганды насилия, зависимостей и нечестных поступков.\n\n"
@@ -225,7 +237,11 @@ START_MSG_4 = (
     "#семья #чудо\n"
     "или\n"
     "#исцеление #путькБогу\n\n"
-    "Хештеги ставь в самом низу сообщения, слитно, без пробелов внутри."
+    "Хештеги ставь в самом низу сообщения, слитно, без пробелов внутри.\n\n"
+    "<b>Команды:</b>\n"
+    "/story — короткая история (до 4000 символов)\n"
+    "/long_story — длинная история (до 30 000 символов)\n"
+    "/ad — реклама"
 )
 
 
@@ -237,6 +253,15 @@ async def cmd_start(message: Message):
     await message.answer(START_MSG_2)
     await message.answer(START_MSG_3)
     await message.answer(START_MSG_4)
+
+
+@router.message(F.text == "/story")
+async def cmd_story(message: Message):
+    """Переименовываем обычную историю в /story"""
+    await message.answer(
+        "✍️ <b>Короткая история</b> (до 4000 символов)\n\n"
+        "Напиши свою историю или отправь фото с подписью:"
+    )
 
 
 @router.message(F.text.startswith("/ad "))
@@ -311,17 +336,15 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ
+# ---------- ✅ КОРОТКАЯ ИСТОРИЯ (/story) ----------
+
 @router.message(
     (F.photo & ~F.reply_to_message) | 
-    (F.text & ~F.text.startswith(("/ad", "/start")))
+    (F.text & ~F.text.startswith(("/ad", "/start", "/story", "/long_story")) & ~F.text == "/cancel")
 )
-async def handle_story(message: Message):
+async def handle_short_story(message: Message):
     """
-    ✅ ЛОВИТ ВСЁ ОТ ТЕБЯ И ПОЛЬЗОВАТЕЛЕЙ:
-    * Фото без текста (ты отклоняешь ❌)
-    * Фото + текст  
-    * Просто текст
+    ЛОВИТ: фото, текст (кроме команд)
     """
     user = message.from_user
 
@@ -365,16 +388,14 @@ async def handle_story(message: Message):
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # Шлём модераторам ВСЕ истории
+    # Шлём модераторам
     if MOD_CHAT_ID:
         supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
-        
-        # Показываем тип контента
         content_type = "📷 Только фото" if has_photo and not has_text else \
                       "📷 Фото + текст" if has_photo else "📝 Текст"
         
         header = (
-            f"🆕 Новая история\n"
+            f"🆕 Короткая история\n"
             f"Тип: {content_type}\n"
             f"Автор: @{story.username} (id {story.user_id})\n"
             f"{supabase_mark}\n\n"
@@ -395,11 +416,147 @@ async def handle_story(message: Message):
                 header + text,
                 reply_markup=kb,
             )
-    else:
-        print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- ИСПРАВЛЕННЫЙ ХЕНДЛЕР МОДЕРАЦИИ ----------
+# ---------- ✅ ДЛИННАЯ ИСТОРИЯ (/long_story) ----------
+
+@router.message(F.text == "/long_story")
+async def cmd_long_story(message: Message, state: FSMContext):
+    """Начинаем длинную историю"""
+    current_state = await state.get_state()
+    if current_state is not None:
+        await message.answer("⏳ Ты уже пишешь историю! Заверши её или /cancel")
+        return
+        
+    await message.answer(
+        "📝 <b>Длинная история (до 30 000 символов)</b>\n\n"
+        "Напиши <b>ЗАГОЛОВОК</b> (до 100 символов):"
+    )
+    await state.set_state(LongStory.title)
+    await state.update_data(
+        user_id=message.from_user.id,
+        username=message.from_user.username or "anon"
+    )
+
+
+@router.message(LongStory.title)
+async def long_title(message: Message, state: FSMContext):
+    if len(message.text) > 100:
+        await message.answer("❌ Заголовок до 100 символов! Попробуй ещё раз:")
+        return
+        
+    await state.update_data(title=message.text)
+    await message.answer("✍️ <b>Часть 1/3</b> (до 4000 символов):")
+    await state.set_state(LongStory.part1)
+
+
+@router.message(LongStory.part1)
+async def long_part1(message: Message, state: FSMContext):
+    if len(message.text) > 4000:
+        await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
+        return
+        
+    await state.update_data(part1=message.text)
+    await message.answer("✍️ <b>Часть 2/3</b> (до 4000 символов):")
+    await state.set_state(LongStory.part2)
+
+
+@router.message(LongStory.part2)
+async def long_part2(message: Message, state: FSMContext):
+    if len(message.text) > 4000:
+        await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
+        return
+        
+    await state.update_data(part2=message.text)
+    await message.answer("✍️ <b>Часть 3/3</b> (до 4000 символов):")
+    await state.set_state(LongStory.part3)
+
+
+@router.message(LongStory.part3)
+async def long_part3(message: Message, state: FSMContext):
+    if len(message.text) > 4000:
+        await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
+        return
+        
+    await state.update_data(part3=message.text)
+    await message.answer("📷 Отправь фото (или напиши 'без фото'):")
+    await state.set_state(LongStory.photo)
+
+
+@router.message(LongStory.photo)
+async def long_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    
+    # Собираем ВСЮ историю в одно сообщение
+    full_story = (
+        f"<b>{data['title']}</b>\n\n"
+        f"<b>Часть 1:</b>\n{data['part1']}\n\n"
+        f"<b>Часть 2:</b>\n{data['part2']}\n\n"
+        f"<b>Часть 3:</b>\n{data['part3']}"
+    )
+    
+    photo_file_id = None
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+    elif message.text and message.text.lower() != "без фото":
+        await message.answer("❌ Неправильный формат. Отправь фото или 'без фото':")
+        return
+
+    # Сохраняем как ОДНУ историю
+    story = Story(
+        id=None,
+        user_id=data['user_id'],
+        username=data['username'],
+        text=full_story,
+        type="long_story",
+        photo_file_id=photo_file_id,
+    )
+    
+    story_id = await save_story_to_supabase(story)
+    await state.clear()  # ✅ Очищаем FSM!
+    
+    await message.answer("✅ Длинная история отправлена на модерацию!")
+
+    # ✅ Модераторам — ОДНО ЦЕЛОЕ сообщение
+    if MOD_CHAT_ID:
+        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
+        header = (
+            f"🆕 <b>ДЛИННАЯ ИСТОРИЯ</b>\n"
+            f"Автор: @{data['username']} (id {data['user_id']})\n"
+            f"📄 {len(full_story)} символов\n"
+            f"{'📷 + фото' if photo_file_id else '📝 только текст'}\n"
+            f"{supabase_mark}\n\n"
+        )
+
+        kb = moderation_keyboard(story_id or 0)
+
+        if photo_file_id:
+            await bot.send_photo(
+                MOD_CHAT_ID,
+                photo=photo_file_id,
+                caption=header + full_story,
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                MOD_CHAT_ID,
+                header + full_story,
+                reply_markup=kb,
+            )
+
+
+@router.message(F.text == "/cancel")
+async def cancel_long(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активной длинной истории.")
+        return
+        
+    await state.clear()
+    await message.answer("✅ Длинная история отменена.")
+
+
+# ---------- ХЕНДЛЕРЫ МОДЕРАЦИИ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
@@ -414,13 +571,16 @@ async def cb_approve(call: CallbackQuery):
 
     full_text = call.message.caption or call.message.text or ""
     
-    # ✅ УМНАЯ ОЧИСТКА ЗАГОЛОВКА — убираем всё до текста истории
+    # ✅ УМНАЯ ОЧИСТКА ЗАГОЛОВКА
     lines = full_text.split("\n")
-    # Пропускаем заголовок (5 строк: 🆕, Тип, Автор, ID, пустая строка)
     story_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
     
-    # Если текста нет (только фото) — публикуем БЕЗ подписи
-    if not story_text:
+    # Для длинных историй — обрезаем до 4000 + ссылка на Дзен
+    if "ДЛИННАЯ ИСТОРИЯ" in full_text:
+        story_text = story_text[:4000] + "\n\n🔗 <b>Полная история в Дзене:</b> dzen.ru/your_channel"
+    
+    # Если текста нет — публикуем БЕЗ подписи
+    if not story_text.strip():
         story_text = None
 
     # ✅ ПУБЛИКАЦИЯ ЧИСТЫМ КОНТЕНТОМ
@@ -439,7 +599,7 @@ async def cb_approve(call: CallbackQuery):
             reply_markup=share_your_story_keyboard(),
         )
 
-    # Удаляем запись из Supabase
+    # Удаляем из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
@@ -447,15 +607,16 @@ async def cb_approve(call: CallbackQuery):
     # Уведомляем автора
     user_id = extract_user_id_from_moderation_text(full_text)
     if user_id:
+        story_type = "длинная история" if "ДЛИННАЯ ИСТОРИЯ" in full_text else "история"
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="✨ Твоя история прошла модерацию и опубликована в канале. Спасибо, что делишься чудом!",
+                text=f"✨ Твоя {story_type} прошла модерацию и опубликована в канале. Спасибо!",
             )
         except Exception as e:
             print("Cannot notify user:", e)
 
-    # Помечаем сообщение модерации
+    # Помечаем модерацию
     suffix = "\n\n✅ Одобрено и опубликовано."
     if not full_text.endswith("✅ Одобрено и опубликовано."):
         new_text = full_text + suffix
@@ -488,9 +649,9 @@ async def cb_reject(call: CallbackQuery):
             await bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "Твоя история не прошла модерацию и не была опубликована.\n\n"
+                    "Твоя история не прошла модерацию.\n\n"
                     "Проверь, пожалуйста, чтобы не было политики, брани и оскорблений, "
-                    "и попробуй пересказать её чуть мягче."
+                    "и попробуй пересказать её мягче."
                 ),
             )
         except Exception as e:
