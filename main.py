@@ -3,7 +3,7 @@ import os
 import time
 import re
 from dataclasses import dataclass
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -27,8 +27,6 @@ LIMIT_SECONDS = 2 * 24 * 60 * 60  # 2 дня
 
 # Глобальные хранилища
 last_story_ts: Dict[int, float] = {}
-pending_long_parts: Dict[int, List[str]] = {}
-user_long_activity: Dict[int, float] = {}
 
 
 # ---------- FSM СОСТОЯНИЯ ----------
@@ -50,7 +48,7 @@ class Story:
     username: str
     text: str
     status: str = "pending"
-    type: str = "text"  # "text", "photo", "long_story", "auto_long_story"
+    type: str = "text"  # "text", "photo", "long_story"
     photo_file_id: Optional[str] = None
 
 
@@ -239,6 +237,80 @@ START_MSG_4 = (
 )
 
 
+# ---------- ✅ УНИВЕРСАЛЬНЫЙ ХЕНДЛЕР — ЛОВИТ ВСЁ ----------
+
+@router.message(F.text & ~F.text.startswith(("/ad", "/start", "/long_story", "/cancel")))
+@router.message(F.photo & ~F.reply_to_message)
+async def universal_story_handler(message: Message, state: FSMContext):
+    """🎯 ЛОВИТ ВСЕ истории — простой и надёжный"""
+    
+    # Проверяем FSM
+    current_state = await state.get_state()
+    if current_state:
+        return  # FSM сам обработает
+    
+    user = message.from_user
+    text = message.caption or message.text or ""
+    has_photo = message.photo is not None
+    photo_file_id = message.photo[-1].file_id if has_photo else None
+    
+    print(f"📨 STORY FROM {user.id}: {len(text)} chars, photo: {has_photo}")
+    
+    # ЛИМИТ ДЛЯ АДМИНА ОТКЛЮЧЁН
+    if user.id != ADMIN_USER_ID:
+        now = time.time()
+        last_ts = last_story_ts.get(user.id)
+        if last_ts and now - last_ts < LIMIT_SECONDS:
+            hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
+            await message.answer(f"⏳ Подожди {hours_left} ч для новой истории.")
+            return
+        last_story_ts[user.id] = now
+    
+    # СОХРАНЯЕМ В SUPABASE
+    story = Story(
+        user_id=user.id,
+        username=user.username or "anon",
+        text=text,
+        type="photo" if has_photo else "text",
+        photo_file_id=photo_file_id,
+    )
+    
+    story_id = await save_story_to_supabase(story)
+    await message.answer("✅ История отправлена на модерацию!")
+    
+    # МОДЕРАЦИЯ
+    if MOD_CHAT_ID:
+        content_type = "📷 Только фото" if has_photo and not text.strip() else \
+                      "📷 Фото+текст" if has_photo else "📝 Текст"
+        
+        header = (
+            f"🆕 Короткая история\n"
+            f"Тип: {content_type}\n"
+            f"Автор: @{story.username} (id {story.user_id})\n"
+            f"📄 {len(text)} символов\n"
+            f"ID БД: {story_id or 'нет'}\n\n"
+        )
+        kb = moderation_keyboard(story_id or 0)
+
+        try:
+            if has_photo:
+                await bot.send_photo(
+                    MOD_CHAT_ID, 
+                    photo=photo_file_id, 
+                    caption=header + text, 
+                    reply_markup=kb
+                )
+            else:
+                await bot.send_message(
+                    MOD_CHAT_ID, 
+                    header + text, 
+                    reply_markup=kb
+                )
+            print(f"✅ STORY SENT TO MOD: {user.id}")
+        except Exception as e:
+            print(f"❌ MOD ERROR: {e}")
+
+
 # ---------- ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЯ ----------
 
 @router.message(F.text == "/start")
@@ -342,9 +414,6 @@ async def cancel_long(message: Message, state: FSMContext):
         await message.answer("Нет активной длинной истории.")
         return
         
-    user_id = message.from_user.id
-    pending_long_parts.pop(user_id, None)
-    user_long_activity.pop(user_id, None)
     await state.clear()
     await message.answer("✅ Длинная история отменена.")
 
@@ -425,8 +494,6 @@ async def long_photo(message: Message, state: FSMContext):
     
     story_id = await save_story_to_supabase(story)
     await state.clear()
-    pending_long_parts.pop(data['user_id'], None)
-    user_long_activity.pop(data['user_id'], None)
     
     await message.answer("✅ Длинная история отправлена на модерацию!")
     print(f"✅ FULL STORY SAVED: {data['user_id']}, {len(full_story)} chars")
@@ -456,156 +523,9 @@ async def long_photo(message: Message, state: FSMContext):
                     header + full_story, 
                     reply_markup=kb
                 )
-            print("✅ SENT TO MODERATION!")
+            print("✅ LONG STORY SENT TO MODERATION!")
         except Exception as e:
             print(f"❌ MODERATION ERROR: {e}")
-
-
-# ---------- ✅ УМНЫЙ АВТО-СБОР ДЛИННЫХ ТЕКСТОВ ----------
-
-@router.message(F.text & ~F.text.startswith(("/ad", "/start", "/long_story", "/cancel")))
-async def collect_long_parts(message: Message, state: FSMContext):
-    """🎯 Автоматически собирает ЛЮБЫЕ длинные тексты"""
-    user_id = message.from_user.id
-    text_len = len(message.text or "")
-    
-    # Проверяем FSM состояние
-    current_state = await state.get_state()
-    if current_state:
-        return
-    
-    now = time.time()
-    
-    # ✅ ЛОВИМ ДЛИННЫЕ ТЕКСТЫ АВТОМАТИЧЕСКИ (>1000 символов)
-    if text_len > 1000:
-        print(f"🚀 LONG TEXT DETECTED: {user_id} ({text_len} chars)")
-        pending_long_parts.setdefault(user_id, []).append(message.text)
-        user_long_activity[user_id] = now
-        
-        # Если >10к символов ИЛИ прошло 10 сек — собираем
-        total_chars = sum(len(part) for part in pending_long_parts[user_id])
-        if total_chars > 10000 or (now - user_long_activity[user_id] > 10):
-            await assemble_long_story_from_parts(message, user_id)
-        return
-    
-    # ✅ Если пользователь недавно писал длинные тексты — продолжаем собирать
-    if user_id in user_long_activity and (now - user_long_activity[user_id] < 30):
-        pending_long_parts.setdefault(user_id, []).append(message.text)
-        print(f"📝 CONTINUED PART: {user_id} ({text_len} chars)")
-        
-        total_chars = sum(len(part) for part in pending_long_parts[user_id])
-        if total_chars > 10000:
-            await assemble_long_story_from_parts(message, user_id)
-        return
-    
-    # Обычная короткая история
-    await handle_short_story(message)
-
-
-async def assemble_long_story_from_parts(message: Message, user_id: int):
-    """Собирает длинную историю из частей Telegram"""
-    parts = pending_long_parts.pop(user_id)
-    user_long_activity.pop(user_id, None)
-    
-    full_story = "\n\n".join(parts)
-    
-    story = Story(
-        user_id=user_id,
-        username="anon",
-        text=f"<b>Авто-собранная длинная история</b>\n\n{full_story}",
-        type="auto_long_story",
-        photo_file_id=None
-    )
-    
-    story_id = await save_story_to_supabase(story)
-    await message.answer("✅ Длинная история (авто-собрана из частей) отправлена на модерацию!")
-    print(f"✅ AUTO STORY ASSEMBLED: {user_id}, {len(full_story)} chars from {len(parts)} parts")
-
-    if MOD_CHAT_ID:
-        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
-        header = (
-            f"🆕 <b>АВТО ДЛИННАЯ ИСТОРИЯ</b>\n"
-            f"Автор: anon (id {user_id})\n"
-            f"📄 {len(full_story)} символов (из {len(parts)} частей)\n"
-            f"{supabase_mark}\n\n"
-        )
-        preview_text = full_story[:8000] + "..." if len(full_story) > 8000 else full_story
-        
-        await bot.send_message(
-            MOD_CHAT_ID,
-            header + preview_text,
-            reply_markup=moderation_keyboard(story_id or 0)
-        )
-        print("✅ AUTO STORY SENT TO MODERATION!")
-
-
-# ---------- ✅ КОРОТКАЯ ИСТОРИЯ ----------
-
-async def handle_short_story(message: Message):
-    user = message.from_user
-
-    if user.id != ADMIN_USER_ID:
-        now = time.time()
-        last_ts = last_story_ts.get(user.id)
-        if last_ts and now - last_ts < LIMIT_SECONDS:
-            hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
-            await message.answer(
-                "Ты уже делился историей недавно.\n"
-                f"Пожалуйста, приходи с новой историей через примерно {hours_left} ч."
-            )
-            return
-        last_story_ts[user.id] = now
-
-    has_photo = message.photo is not None
-    text = message.caption or message.text or ""
-    story_type = "photo" if has_photo else "text"
-    photo_file_id = message.photo[-1].file_id if has_photo else None
-
-    story = Story(
-        id=None,
-        user_id=user.id,
-        username=user.username or "anon",
-        text=text,
-        type=story_type,
-        photo_file_id=photo_file_id,
-    )
-
-    story_id = await save_story_to_supabase(story)
-    await message.answer("История отправлена на модерацию ✅")
-
-    if MOD_CHAT_ID:
-        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
-        content_type = "📷 Только фото" if has_photo and not text.strip() else \
-                      "📷 Фото + текст" if has_photo else "📝 Текст"
-        
-        header = (
-            f"🆕 Короткая история\n"
-            f"Тип: {content_type}\n"
-            f"Автор: @{story.username} (id {story.user_id})\n"
-            f"{supabase_mark}\n\n"
-        )
-
-        kb = moderation_keyboard(story_id or 0)
-
-        if story_type == "photo":
-            await bot.send_photo(
-                MOD_CHAT_ID,
-                photo=photo_file_id,
-                caption=header + text,
-                reply_markup=kb,
-            )
-        else:
-            await bot.send_message(
-                MOD_CHAT_ID,
-                header + text,
-                reply_markup=kb,
-            )
-
-
-@router.message(F.photo & ~F.reply_to_message)
-async def handle_photo_short_story(message: Message):
-    """Отдельный хендлер для фото (чтобы не пересекался с текстом)"""
-    await handle_short_story(message)
 
 
 # ---------- ХЕНДЛЕРЫ МОДЕРАЦИИ ----------
@@ -626,7 +546,7 @@ async def cb_approve(call: CallbackQuery):
     lines = full_text.split("\n")
     story_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
     
-    if "ДЛИННАЯ ИСТОРИЯ" in full_text or "АВТО ДЛИННАЯ" in full_text:
+    if "ДЛИННАЯ ИСТОРИЯ" in full_text:
         story_text = story_text[:4000] + "\n\n🔗 <b>Полная история в Дзене:</b> dzen.ru/your_channel"
     
     if not story_text.strip():
@@ -653,7 +573,7 @@ async def cb_approve(call: CallbackQuery):
 
     user_id = extract_user_id_from_moderation_text(full_text)
     if user_id:
-        story_type = "длинная история" if "ДЛИННАЯ ИСТОРИЯ" in full_text or "АВТО ДЛИННАЯ" in full_text else "история"
+        story_type = "длинная история" if "ДЛИННАЯ ИСТОРИЯ" in full_text else "история"
         try:
             await bot.send_message(
                 chat_id=user_id,
@@ -712,7 +632,7 @@ async def cb_reject(call: CallbackQuery):
 # ---------- ЗАПУСК ----------
 
 async def main():
-    print("Bot started polling...")
+    print("🤖 Bot started polling... ✅")
     await dp.start_polling(bot)
 
 
