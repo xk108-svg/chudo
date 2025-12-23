@@ -28,6 +28,7 @@ LIMIT_SECONDS = 2 * 24 * 60 * 60  # 2 дня
 # Глобальные хранилища
 last_story_ts: Dict[int, float] = {}
 pending_long_parts: Dict[int, List[str]] = {}
+user_long_activity: Dict[int, float] = {}
 
 
 # ---------- FSM СОСТОЯНИЯ ----------
@@ -323,7 +324,6 @@ async def cmd_long_story(message: Message, state: FSMContext):
         return
         
     print(f"🚀 START LONG STORY: {message.from_user.id}")
-    pending_long_parts[message.from_user.id] = []  # Инициализируем очередь
     await message.answer(
         "📝 <b>Длинная история (до 30 000 символов)</b>\n\n"
         "Напиши <b>ЗАГОЛОВОК</b> (до 100 символов):"
@@ -343,7 +343,8 @@ async def cancel_long(message: Message, state: FSMContext):
         return
         
     user_id = message.from_user.id
-    pending_long_parts.pop(user_id, None)  # Очищаем очередь
+    pending_long_parts.pop(user_id, None)
+    user_long_activity.pop(user_id, None)
     await state.clear()
     await message.answer("✅ Длинная история отменена.")
 
@@ -425,6 +426,7 @@ async def long_photo(message: Message, state: FSMContext):
     story_id = await save_story_to_supabase(story)
     await state.clear()
     pending_long_parts.pop(data['user_id'], None)
+    user_long_activity.pop(data['user_id'], None)
     
     await message.answer("✅ Длинная история отправлена на модерацию!")
     print(f"✅ FULL STORY SAVED: {data['user_id']}, {len(full_story)} chars")
@@ -459,25 +461,40 @@ async def long_photo(message: Message, state: FSMContext):
             print(f"❌ MODERATION ERROR: {e}")
 
 
-# ---------- ✅ АВТО-СБОР ДЛИННЫХ ТЕКСТОВ ----------
+# ---------- ✅ УМНЫЙ АВТО-СБОР ДЛИННЫХ ТЕКСТОВ ----------
 
 @router.message(F.text & ~F.text.startswith(("/ad", "/start", "/long_story", "/cancel")))
 async def collect_long_parts(message: Message, state: FSMContext):
-    """🎯 Собирает все части длинного текста по user_id"""
+    """🎯 Автоматически собирает ЛЮБЫЕ длинные тексты"""
     user_id = message.from_user.id
+    text_len = len(message.text or "")
     
     # Проверяем FSM состояние
     current_state = await state.get_state()
     if current_state:
-        return  # Уже в FSM — пропускаем
+        return
     
-    # Авто-сбор длинных текстов
-    if user_id in pending_long_parts:
-        pending_long_parts[user_id].append(message.text)
-        print(f"📝 COLLECTED PART {len(pending_long_parts[user_id])}: {user_id} ({len(message.text)} chars)")
+    now = time.time()
+    
+    # ✅ ЛОВИМ ДЛИННЫЕ ТЕКСТЫ АВТОМАТИЧЕСКИ (>1000 символов)
+    if text_len > 1000:
+        print(f"🚀 LONG TEXT DETECTED: {user_id} ({text_len} chars)")
+        pending_long_parts.setdefault(user_id, []).append(message.text)
+        user_long_activity[user_id] = now
         
-        # Если набралось >10к символов — собираем историю
-        if sum(len(part) for part in pending_long_parts[user_id]) > 10000:
+        # Если >10к символов ИЛИ прошло 10 сек — собираем
+        total_chars = sum(len(part) for part in pending_long_parts[user_id])
+        if total_chars > 10000 or (now - user_long_activity[user_id] > 10):
+            await assemble_long_story_from_parts(message, user_id)
+        return
+    
+    # ✅ Если пользователь недавно писал длинные тексты — продолжаем собирать
+    if user_id in user_long_activity and (now - user_long_activity[user_id] < 30):
+        pending_long_parts.setdefault(user_id, []).append(message.text)
+        print(f"📝 CONTINUED PART: {user_id} ({text_len} chars)")
+        
+        total_chars = sum(len(part) for part in pending_long_parts[user_id])
+        if total_chars > 10000:
             await assemble_long_story_from_parts(message, user_id)
         return
     
@@ -488,6 +505,7 @@ async def collect_long_parts(message: Message, state: FSMContext):
 async def assemble_long_story_from_parts(message: Message, user_id: int):
     """Собирает длинную историю из частей Telegram"""
     parts = pending_long_parts.pop(user_id)
+    user_long_activity.pop(user_id, None)
     
     full_story = "\n\n".join(parts)
     
