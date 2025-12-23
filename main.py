@@ -33,6 +33,9 @@ last_story_ts: Dict[int, float] = {}
 message_buffer: Dict[int, List[Dict]] = {}
 BUFFER_TIMEOUT = 10  # секунд ожидания новых частей
 
+# ✅ Таймеры для каждого пользователя
+buffer_timers: Dict[int, asyncio.Task] = {}
+
 
 # ---------- FSM СОСТОЯНИЯ ----------
 
@@ -164,15 +167,19 @@ async def delete_story_from_supabase(story_id: int) -> bool:
     return data is not None
 
 
-# ---------- ✅ БУФЕР ДЛЯ ДЛИННЫХ СООБЩЕНИЙ ----------
+# ---------- ✅ ИСПРАВЛЕННЫЙ БУФЕР ----------
 
 async def flush_buffer(user_id: int):
     """Собирает все части сообщения пользователя и отправляет в модерацию"""
+    print(f"🔄 FLUSH_BUFFER вызван для {user_id}")
+    
     if user_id not in message_buffer:
+        print(f"❌ Буфер пуст для {user_id}")
         return
     
     parts = message_buffer.pop(user_id, [])
     if not parts:
+        print(f"❌ Части пусты для {user_id}")
         return
     
     print(f"📦 СОБИРАЕМ: {user_id} — {len(parts)} частей")
@@ -185,11 +192,15 @@ async def flush_buffer(user_id: int):
     for part in parts:
         if part.get('photo'):
             photo_file_id = part['photo']
+            print(f"📷 Найдено фото: {photo_file_id[:20]}...")
         elif part.get('text'):
             full_text += part['text'] + "\n\n"
     
     full_text = full_text.strip()
+    print(f"📝 Собранный текст: {len(full_text)} символов")
+    
     if not full_text and not photo_file_id:
+        print(f"❌ Нет контента для {user_id}")
         return
         
     story = Story(
@@ -202,12 +213,14 @@ async def flush_buffer(user_id: int):
     )
     
     story_id = await save_story_to_supabase(story)
+    print(f"💾 Supabase ID: {story_id}")
     
     # Подтверждение пользователю
     try:
         await bot.send_message(user_id, "История отправлена на модерацию ✅")
-    except:
-        pass
+        print(f"✅ Уведомление пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка уведомления {user_id}: {e}")
     
     # Шлём модераторам
     if MOD_CHAT_ID:
@@ -233,15 +246,18 @@ async def flush_buffer(user_id: int):
                     caption=header + full_text,
                     reply_markup=kb,
                 )
+                print(f"✅ ОТПРАВЛЕНО В МОД: фото + {len(full_text)} символов")
             else:
                 await bot.send_message(
                     MOD_CHAT_ID,
                     header + full_text,
                     reply_markup=kb,
                 )
-            print(f"✅ BUFFER → МОДЕРАЦИЯ: {user_id}")
+                print(f"✅ ОТПРАВЛЕНО В МОД: текст {len(full_text)} символов")
         except Exception as e:
-            print(f"❌ BUFFER ERROR: {e}")
+            print(f"❌ ОШИБКА ОТПРАВКИ В МОД: {e}")
+    else:
+        print("SKIP: нет MOD_CHAT_ID")
 
 
 # ---------- СЛУЖЕБНЫЕ ФУНКЦИИ ----------
@@ -277,9 +293,6 @@ def share_your_story_keyboard() -> InlineKeyboardMarkup:
 
 
 def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
-    """
-    Ищет в тексте строку вида '(id 123456789)' и возвращает число.
-    """
     m = re.search(r"\(id (\d+)\)", text)
     if not m:
         return None
@@ -338,10 +351,6 @@ async def cmd_start(message: Message):
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
-    """
-    ✅ РЕКЛАМА БЕЗ ЛИШНЕЙ КНОПКИ + КАРТИНКА ОДНИМ ПОСТОМ
-    """
-    # Reply на фото для рекламы с картинкой
     if message.reply_to_message and message.reply_to_message.photo:
         photo = message.reply_to_message.photo[-1]
         ad_text = message.text[4:].strip()
@@ -350,7 +359,6 @@ async def cmd_ad(message: Message):
             await message.answer("❌ После /ad напиши текст объявления.")
             return
             
-        # ✅ РЕКЛАМА С КАРТИНКОЙ - ТОЛЬКО "Поделись историей"
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo.file_id,
@@ -363,7 +371,6 @@ async def cmd_ad(message: Message):
             ]),
         )
         
-        # Чистка следов
         try:
             await message.reply_to_message.delete()
             await message.delete()
@@ -378,7 +385,6 @@ async def cmd_ad(message: Message):
             pass
         return
 
-    # Текстовая реклама - ТОЛЬКО "Поделись историей"
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("❌ После /ad напиши текст объявления.")
@@ -408,7 +414,7 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ 🔥 ОСНОВНОЙ ХЕНДЛЕР С БУФЕРОМ — ЛОВИТ ТЕКСТЫ И ФОТО!
+# 🔥 ✅ ИСПРАВЛЕННЫЙ ОСНОВНОЙ ХЕНДЛЕР
 @router.message(
     F.content_type.in_({ContentType.TEXT, ContentType.PHOTO}) & 
     ~F.reply_to_message & 
@@ -416,10 +422,9 @@ async def cmd_ad(message: Message):
 )
 async def handle_story_buffered(message: Message, state: FSMContext):
     """
-    ✅ ЛОВИТ ТЕКСТЫ И ФОТО + АВТОСБОР ДЛИННЫХ СООБЩЕНИЙ!
-    Короткие <500 символов → СРАЗУ в модерацию
-    Длинные → собирает за 10 секунд
+    ✅ ЛОВИТ ТЕКСТЫ, ФОТО С ПОДПИСЬЮ, ФОТО БЕЗ ПОДПИСИ!
     """
+    print(f"🔥 ХЕНДЛЕР СРАБОТАЛ: {message.from_user.id}")
     
     # Проверяем FSM
     if await state.get_state():
@@ -430,7 +435,9 @@ async def handle_story_buffered(message: Message, state: FSMContext):
     user_id = user.id
     now = time.time()
     
-    print(f"📨 СООБЩЕНИЕ: {user_id} | text='{message.text[:50]}...'")
+    # ✅ ТЕКСТОВОЕ СОДЕРЖИМОЕ (text ИЛИ caption)
+    text_content = message.text or message.caption or ""
+    print(f"📨 {user_id}: '{text_content[:50]}...' ({len(text_content)} символов)")
     
     # Ограничение ТОЛЬКО для пользователей (ты без лимита)
     if user.id != ADMIN_USER_ID:
@@ -444,8 +451,10 @@ async def handle_story_buffered(message: Message, state: FSMContext):
             return
         last_story_ts[user.id] = now
 
-    # ✅ ТЕКСТОВОЕ СОДЕРЖИМОЕ (text ИЛИ caption)
-    text_content = message.text or message.caption or ""
+    # ✅ ОСТАНАВЛИВАЕМ ПРЕДЫДУЩИЙ ТАЙМЕР
+    if user_id in buffer_timers:
+        buffer_timers[user_id].cancel()
+        print(f"⏹️ Отменён старый таймер для {user_id}")
     
     # ✅ БУФЕР: добавляем сообщение
     message_buffer.setdefault(user_id, []).append({
@@ -455,23 +464,24 @@ async def handle_story_buffered(message: Message, state: FSMContext):
         'username': user.username or "anon"
     })
     
-    # ✅ КОРОТКИЕ ТЕКСТЫ — СРАЗУ В МОДЕРАЦИЮ!
+    print(f"📦 Добавлено в буфер: {len(message_buffer[user_id])} частей")
+    
+    # ✅ КОРОТКИЕ ТЕКСТЫ — СРАЗУ!
     if len(text_content) < 500 and not message.photo:
-        print(f"⚡ КОРОТКОЕ СРАЗУ: {user_id} ({len(text_content)} символов)")
+        print(f"⚡ КОРОТКОЕ СРАЗУ: {user_id}")
         await flush_buffer(user_id)
         return
     
-    # ✅ ДЛИННЫЕ — ЖДЁМ 10 СЕКУНД
-    print(f"⏳ БУФЕР: {user_id} — ждём {BUFFER_TIMEOUT}с ({len(text_content)} символов)")
-    
-    # Запускаем таймер
+    # ✅ ДЛИННЫЕ — ЗАПУСКАЕМ НОВЫЙ ТАЙМЕР
     async def timeout_flush():
+        print(f"⏰ Таймер запущен для {user_id}")
         await asyncio.sleep(BUFFER_TIMEOUT)
+        print(f"⏰ ТАЙМАУТ СРАБОТАЛ для {user_id}")
         if user_id in message_buffer:  # Буфер ещё существует
-            print(f"⏰ ТАЙМАУТ: flush {user_id}")
             await flush_buffer(user_id)
     
-    asyncio.create_task(timeout_flush())
+    buffer_timers[user_id] = asyncio.create_task(timeout_flush())
+    print(f"⏳ Новый таймер для {user_id} ({len(text_content)} символов)")
 
 
 # ---------- FSM ДЛЯ ДЛИННЫХ ИСТОРИЙ ----------
@@ -585,7 +595,7 @@ async def long_photo(message: Message, state: FSMContext):
             )
 
 
-# ---------- ИСПРАВЛЕННЫЙ ХЕНДЛЕР МОДЕРАЦИИ ----------
+# ---------- МОДЕРАЦИЯ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
@@ -600,16 +610,12 @@ async def cb_approve(call: CallbackQuery):
 
     full_text = call.message.caption or call.message.text or ""
     
-    # ✅ УМНАЯ ОЧИСТКА ЗАГОЛОВКА — убираем всё до текста истории
     lines = full_text.split("\n")
-    # Пропускаем заголовок (5 строк: 🆕, Тип, Автор, ID, пустая строка)
     story_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
     
-    # Если текста нет (только фото) — публикуем БЕЗ подписи
     if not story_text:
         story_text = None
 
-    # ✅ ПУБЛИКАЦИЯ ЧИСТЫМ КОНТЕНТОМ
     if call.message.photo:
         photo = call.message.photo[-1]
         await bot.send_photo(
@@ -625,12 +631,10 @@ async def cb_approve(call: CallbackQuery):
             reply_markup=share_your_story_keyboard(),
         )
 
-    # Удаляем запись из Supabase
     if story_id != 0:
         deleted = await delete_story_from_supabase(story_id)
         print("Supabase delete:", deleted)
 
-    # Уведомляем автора
     user_id = extract_user_id_from_moderation_text(full_text)
     if user_id:
         try:
@@ -641,7 +645,6 @@ async def cb_approve(call: CallbackQuery):
         except Exception as e:
             print("Cannot notify user:", e)
 
-    # Помечаем сообщение модерации
     suffix = "\n\n✅ Одобрено и опубликовано."
     if not full_text.endswith("✅ Одобрено и опубликовано."):
         new_text = full_text + suffix
@@ -667,7 +670,6 @@ async def cb_reject(call: CallbackQuery):
 
     full_text = call.message.caption or call.message.text or ""
 
-    # Уведомляем автора
     user_id = extract_user_id_from_moderation_text(full_text)
     if user_id:
         try:
