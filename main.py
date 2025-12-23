@@ -255,15 +255,6 @@ async def cmd_start(message: Message):
     await message.answer(START_MSG_4)
 
 
-@router.message(F.text == "/story")
-async def cmd_story(message: Message):
-    """Переименовываем обычную историю в /story"""
-    await message.answer(
-        "✍️ <b>Короткая история</b> (до 4000 символов)\n\n"
-        "Напиши свою историю или отправь фото с подписью:"
-    )
-
-
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
     """
@@ -278,7 +269,6 @@ async def cmd_ad(message: Message):
             await message.answer("❌ После /ad напиши текст объявления.")
             return
             
-        # ✅ РЕКЛАМА С КАРТИНКОЙ - ТОЛЬКО "Поделись историей"
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo.file_id,
@@ -291,7 +281,6 @@ async def cmd_ad(message: Message):
             ]),
         )
         
-        # Чистка следов
         try:
             await message.reply_to_message.delete()
             await message.delete()
@@ -306,7 +295,7 @@ async def cmd_ad(message: Message):
             pass
         return
 
-    # Текстовая реклама - ТОЛЬКО "Поделись историей"
+    # Текстовая реклама
     ad_text = message.text[4:].strip()
     if not ad_text:
         await message.answer("❌ После /ad напиши текст объявления.")
@@ -336,88 +325,6 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ---------- ✅ КОРОТКАЯ ИСТОРИЯ (/story) ----------
-
-@router.message(
-    (F.photo & ~F.reply_to_message) | 
-    (F.text & ~F.text.startswith(("/ad", "/start", "/story", "/long_story")) & ~F.text == "/cancel")
-)
-async def handle_short_story(message: Message):
-    """
-    ЛОВИТ: фото, текст (кроме команд)
-    """
-    user = message.from_user
-
-    # Ограничение ТОЛЬКО для пользователей (ты без лимита)
-    if user.id != ADMIN_USER_ID:
-        now = time.time()
-        last_ts = last_story_ts.get(user.id)
-        if last_ts and now - last_ts < LIMIT_SECONDS:
-            hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
-            await message.answer(
-                "Ты уже делился историей недавно.\n"
-                f"Пожалуйста, приходи с новой историей через примерно {hours_left} ч."
-            )
-            return
-        last_story_ts[user.id] = now
-
-    # Определяем тип контента
-    has_photo = message.photo is not None
-    has_text = (message.text is not None) or (message.caption is not None)
-    
-    if has_photo:
-        photo = message.photo[-1]
-        text = message.caption or ""
-        story_type = "photo"
-        photo_file_id = photo.file_id
-    else:
-        text = message.text or ""
-        story_type = "text"
-        photo_file_id = None
-
-    story = Story(
-        id=None,
-        user_id=user.id,
-        username=user.username or "anon",
-        text=text,
-        type=story_type,
-        photo_file_id=photo_file_id,
-    )
-
-    story_id = await save_story_to_supabase(story)
-
-    await message.answer("История отправлена на модерацию ✅")
-
-    # Шлём модераторам
-    if MOD_CHAT_ID:
-        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
-        content_type = "📷 Только фото" if has_photo and not has_text else \
-                      "📷 Фото + текст" if has_photo else "📝 Текст"
-        
-        header = (
-            f"🆕 Короткая история\n"
-            f"Тип: {content_type}\n"
-            f"Автор: @{story.username} (id {story.user_id})\n"
-            f"{supabase_mark}\n\n"
-        )
-
-        kb = moderation_keyboard(story_id or 0)
-
-        if story_type == "photo":
-            await bot.send_photo(
-                MOD_CHAT_ID,
-                photo=photo_file_id,
-                caption=header + text,
-                reply_markup=kb,
-            )
-        else:
-            await bot.send_message(
-                MOD_CHAT_ID,
-                header + text,
-                reply_markup=kb,
-            )
-
-
 # ---------- ✅ ДЛИННАЯ ИСТОРИЯ (/long_story) ----------
 
 @router.message(F.text == "/long_story")
@@ -439,7 +346,41 @@ async def cmd_long_story(message: Message, state: FSMContext):
     )
 
 
-@router.message(LongStory.title)
+@router.message(F.text == "/cancel")
+async def cancel_long(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активной длинной истории.")
+        return
+        
+    await state.clear()
+    await message.answer("✅ Длинная история отменена.")
+
+
+# ---------- ✅ ГЛАВНЫЙ ФИЛЬТР ДЛЯ ДЛИННЫХ ИСТОРИЙ — ЛОВИТ ВСЁ! ----------
+
+@router.message(LongStory.title, LongStory.part1, LongStory.part2, LongStory.part3, LongStory.photo)
+async def long_story_filter(message: Message, state: FSMContext):
+    """🎯 ЛОВИТ ВСЕ СООБЩЕНИЯ В СОСТОЯНИИ LongStory"""
+    current_state = await state.get_state()
+    if current_state is None:
+        return  # Не наше состояние
+        
+    print(f"FSM caught: {current_state} from user {message.from_user.id}")
+    
+    # Обрабатываем по состоянию
+    if current_state == LongStory.title.state:
+        await long_title(message, state)
+    elif current_state == LongStory.part1.state:
+        await long_part1(message, state)
+    elif current_state == LongStory.part2.state:
+        await long_part2(message, state)
+    elif current_state == LongStory.part3.state:
+        await long_part3(message, state)
+    elif current_state == LongStory.photo.state:
+        await long_photo(message, state)
+
+
 async def long_title(message: Message, state: FSMContext):
     if len(message.text) > 100:
         await message.answer("❌ Заголовок до 100 символов! Попробуй ещё раз:")
@@ -450,7 +391,6 @@ async def long_title(message: Message, state: FSMContext):
     await state.set_state(LongStory.part1)
 
 
-@router.message(LongStory.part1)
 async def long_part1(message: Message, state: FSMContext):
     if len(message.text) > 4000:
         await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
@@ -461,7 +401,6 @@ async def long_part1(message: Message, state: FSMContext):
     await state.set_state(LongStory.part2)
 
 
-@router.message(LongStory.part2)
 async def long_part2(message: Message, state: FSMContext):
     if len(message.text) > 4000:
         await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
@@ -472,7 +411,6 @@ async def long_part2(message: Message, state: FSMContext):
     await state.set_state(LongStory.part3)
 
 
-@router.message(LongStory.part3)
 async def long_part3(message: Message, state: FSMContext):
     if len(message.text) > 4000:
         await message.answer("❌ Часть до 4000 символов! Попробуй ещё раз:")
@@ -483,7 +421,6 @@ async def long_part3(message: Message, state: FSMContext):
     await state.set_state(LongStory.photo)
 
 
-@router.message(LongStory.photo)
 async def long_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     
@@ -498,7 +435,9 @@ async def long_photo(message: Message, state: FSMContext):
     photo_file_id = None
     if message.photo:
         photo_file_id = message.photo[-1].file_id
-    elif message.text and message.text.lower() != "без фото":
+    elif message.text and "без фото" in message.text.lower():
+        pass
+    else:
         await message.answer("❌ Неправильный формат. Отправь фото или 'без фото':")
         return
 
@@ -543,17 +482,81 @@ async def long_photo(message: Message, state: FSMContext):
                 header + full_story,
                 reply_markup=kb,
             )
+        print(f"✅ Long story sent to moderation: {data['user_id']}")
 
 
-@router.message(F.text == "/cancel")
-async def cancel_long(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Нет активной длинной истории.")
-        return
+# ---------- ✅ КОРОТКАЯ ИСТОРИЯ (последний хендлер) ----------
+
+@router.message(
+    (F.photo & ~F.reply_to_message & ~F.text) | 
+    (F.text & ~F.text.startswith(("/ad", "/start", "/story", "/long_story", "/cancel")))
+)
+async def handle_short_story(message: Message):
+    """
+    ЛОВИТ: фото, текст (кроме команд) — ТОЛЬКО ПОСЛЕ FSM!
+    """
+    user = message.from_user
+
+    # Ограничение ТОЛЬКО для пользователей (ты без лимита)
+    if user.id != ADMIN_USER_ID:
+        now = time.time()
+        last_ts = last_story_ts.get(user.id)
+        if last_ts and now - last_ts < LIMIT_SECONDS:
+            hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
+            await message.answer(
+                "Ты уже делился историей недавно.\n"
+                f"Пожалуйста, приходи с новой историей через примерно {hours_left} ч."
+            )
+            return
+        last_story_ts[user.id] = now
+
+    # Определяем тип контента
+    has_photo = message.photo is not None
+    text = message.caption or message.text or ""
+    story_type = "photo" if has_photo else "text"
+    photo_file_id = message.photo[-1].file_id if has_photo else None
+
+    story = Story(
+        id=None,
+        user_id=user.id,
+        username=user.username or "anon",
+        text=text,
+        type=story_type,
+        photo_file_id=photo_file_id,
+    )
+
+    story_id = await save_story_to_supabase(story)
+
+    await message.answer("История отправлена на модерацию ✅")
+
+    # Шлём модераторам
+    if MOD_CHAT_ID:
+        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
+        content_type = "📷 Только фото" if has_photo and not text.strip() else \
+                      "📷 Фото + текст" if has_photo else "📝 Текст"
         
-    await state.clear()
-    await message.answer("✅ Длинная история отменена.")
+        header = (
+            f"🆕 Короткая история\n"
+            f"Тип: {content_type}\n"
+            f"Автор: @{story.username} (id {story.user_id})\n"
+            f"{supabase_mark}\n\n"
+        )
+
+        kb = moderation_keyboard(story_id or 0)
+
+        if story_type == "photo":
+            await bot.send_photo(
+                MOD_CHAT_ID,
+                photo=photo_file_id,
+                caption=header + text,
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                MOD_CHAT_ID,
+                header + text,
+                reply_markup=kb,
+            )
 
 
 # ---------- ХЕНДЛЕРЫ МОДЕРАЦИИ ----------
