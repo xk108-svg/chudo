@@ -424,7 +424,7 @@ async def handle_story(message: Message):
         print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- МОДЕРАЦИЯ СО СКЛЕЙКОЙ ЧАСТЕЙ ----------
+# ---------- 🔥 ИСПРАВЛЕННАЯ МОДЕРАЦИЯ СО СКЛЕЙКОЙ ЧАСТЕЙ ----------
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
@@ -439,25 +439,27 @@ async def cb_approve(call: CallbackQuery):
 
     print(f"✅ ОДОБРЯЕМ story_id={story_id}")
     
-    # 🔥 СКЛЕИВАЕМ ВСЕ ЧАСТИ ПО ЭТОМУ story_id!
+    # 🔥 🔥 ИСПРАВЛЕННАЯ СКЛЕЙКА — РАБОТАЕТ ДЛЯ ЛЮБОЙ ЧАСТИ!
     full_text = ""
     photo_file_id = None
     
-    if story_id in pending_stories:
+    if story_id in pending_stories and pending_stories[story_id]:
         parts = pending_stories[story_id]
         print(f"🔗 НАЙДЕНО {len(parts)} ЧАСТЕЙ ДЛЯ story_id={story_id}")
         
+        # Собираем ВСЕ тексты и последнее фото
         for part in parts:
             if part['photo']:
-                photo_file_id = part['photo']
-            else:
+                photo_file_id = part['photo']  # Берём последнее фото
+            if part['text']:
                 full_text += part['text'] + "\n\n"
         
         full_text = full_text.strip()
         print(f"📝 СКЛЕЕННЫЙ ТЕКСТ: {len(full_text)} символов")
         
-        # Очищаем буфер
+        # 🔥 КРИТИЧНО: очищаем буфер ПОСЛЕ склейки
         del pending_stories[story_id]
+        print(f"🗑️ БУФЕР ОЧИЩЕН для story_id={story_id}")
     else:
         # Одиночное сообщение (нет частей для склейки)
         full_text = call.message.caption or call.message.text or ""
@@ -473,22 +475,29 @@ async def cb_approve(call: CallbackQuery):
 
     # ✅ ПУБЛИКАЦИЯ СКЛЕЕННЫМ/ОДИНОЧНЫМ КОНТЕНТОМ
     try:
+        kb = share_your_story_keyboard()
         if photo_file_id:
-            photo = call.message.photo[-1] if call.message.photo else None
             await bot.send_photo(
                 CHANNEL_ID,
                 photo=photo_file_id,
                 caption=full_text,
-                reply_markup=share_your_story_keyboard(),
+                reply_markup=kb,
             )
-            print("✅ ОПУБЛИКОВАНО: фото")
+            print("✅ ОПУБЛИКОВАНО: ФОТО + ТЕКСТ")
+        elif full_text:
+            await bot.send_message(
+                CHANNEL_ID,
+                full_text,
+                reply_markup=kb,
+            )
+            print("✅ ОПУБЛИКОВАНО: ТЕКСТ")
         else:
             await bot.send_message(
                 CHANNEL_ID,
-                full_text or " ",
-                reply_markup=share_your_story_keyboard(),
+                " ",
+                reply_markup=kb,
             )
-            print("✅ ОПУБЛИКОВАНО: текст")
+            print("✅ ОПУБЛИКОВАНО: ПУСТОЕ")
     except Exception as e:
         print(f"❌ ОШИБКА ПУБЛИКАЦИИ: {e}")
         await call.message.answer(f"❌ Ошибка публикации: {e}")
@@ -513,17 +522,15 @@ async def cb_approve(call: CallbackQuery):
             print("Cannot notify user:", e)
 
     # Помечаем сообщение модерации
-    suffix = "\n\n✅ Одобрено и опубликовано."
     current_text = call.message.caption or call.message.text or ""
-    if not current_text.endswith("✅ Одобрено и опубликовано."):
-        new_text = current_text + suffix
-        try:
-            if call.message.photo:
-                await call.message.edit_caption(new_text)
-            else:
-                await call.message.edit_text(new_text)
-        except Exception as e:
-            print(f"Ошибка редактирования модерации: {e}")
+    new_text = current_text + "\n\n✅ <b>Одобрено и опубликовано!</b>"
+    try:
+        if call.message.photo:
+            await call.message.edit_caption(new_text)
+        else:
+            await call.message.edit_text(new_text)
+    except Exception as e:
+        print(f"Ошибка редактирования модерации: {e}")
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -561,16 +568,15 @@ async def cb_reject(call: CallbackQuery):
         except Exception as e:
             print("Cannot notify user:", e)
 
-    suffix = "\n\n❌ Отклонено."
-    if not full_text.endswith("❌ Отклонено."):
-        new_text = full_text + suffix
-        try:
-            if call.message.photo:
-                await call.message.edit_caption(new_text)
-            else:
-                await call.message.edit_text(new_text)
-        except Exception as e:
-            print(f"Ошибка редактирования модерации: {e}")
+    current_text = call.message.caption or call.message.text or ""
+    new_text = current_text + "\n\n❌ <b>Отклонено</b>"
+    try:
+        if call.message.photo:
+            await call.message.edit_caption(new_text)
+        else:
+            await call.message.edit_text(new_text)
+    except Exception as e:
+        print(f"Ошибка редактирования модерации: {e}")
 
 
 # ---------- ЗАПУСК ----------
