@@ -105,14 +105,10 @@ def moderation_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def channel_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура под постом в канале"""
+    """Клавиатура под постом в канале - ТОЛЬКО ОДНА КНОПКА"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="💬 Обсудить",
-                    url=f"https://t.me/comments_group_108"
-                ),
                 InlineKeyboardButton(
                     text="✍️ Поделись своей историей",
                     url="https://t.me/pishiistorii_bot"
@@ -233,7 +229,7 @@ async def publish_to_channel(user_id: int):
             reactions_msg = await bot.send_message(
                 CHANNEL_ID,
                 "🙏 ❤️ 👍 ✨ 🙌",
-                reply_markup=channel_keyboard(),  # Кнопки под реакциями
+                reply_markup=channel_keyboard(),  # ОДНА кнопка под реакциями
             )
             published_ids.append(reactions_msg.message_id)
             print(f"✅ Отправлено сообщение с реакциями для user_id={user_id}")
@@ -300,7 +296,7 @@ async def cmd_ad(message: Message):
     await bot.send_message(
         CHANNEL_ID,
         "🙏 ❤️ 👍 ✨ 🙌",
-        reply_markup=channel_keyboard(),
+        reply_markup=channel_keyboard(),  # ОДНА кнопка
     )
     
     await message.answer("✅ Реклама опубликована")
@@ -489,7 +485,7 @@ async def main():
     print("📝 ОСОБЕННОСТИ:")
     print("1. Сообщения публикуются как в модерации")
     print("2. После последнего сообщения - отдельное сообщение с реакциями 🙏 ❤️ 👍 ✨ 🙌")
-    print("3. Под реакциями - 2 кнопки: 💬 Обсудить и ✍️ Поделись историей")
+    print("3. Под реакциями - ТОЛЬКО ОДНА кнопка: ✍️ Поделись своей историей")
     print("4. Защита от race conditions")
     print("=" * 50)
     print("✅ ГОТОВ К РАБОТЕ")
