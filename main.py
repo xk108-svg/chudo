@@ -3,9 +3,9 @@ import os
 import time
 import re
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -16,7 +16,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardRemove,
 )
 import aiohttp
 
@@ -25,17 +24,7 @@ import aiohttp
 user_stories: Dict[int, List[Dict]] = {}
 USER_BUFFER_SIZE = 10
 
-# 🔥 СИСТЕМА КОММЕНТАРИЕВ И РЕЙТИНГА
-post_ratings: Dict[int, Dict] = defaultdict(lambda: {
-    'ratings': {},
-    'comments': [],
-    'total_score': 0,
-    'rating_count': 0
-})
-
-user_comments: Dict[int, Dict[int, str]] = defaultdict(dict)
-
-# 🔥 ДЛЯ СТАРОЙ СИСТЕМЫ МОДЕРАЦИИ (одиночные посты)
+# 🔥 ДЛЯ СТАРОЙ СИСТЕМЫ МОДЕРАЦИИ
 moderation_messages: Dict[int, Dict[int, int]] = defaultdict(dict)
 
 
@@ -70,6 +59,7 @@ class StoryPart:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MOD_CHAT_ID_RAW = os.getenv("MOD_CHAT_ID")
 CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
+COMMENTS_CHANNEL = "@comments_group_108"  # Канал для обсуждений
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -79,15 +69,14 @@ print("=" * 50)
 print("ENV BOT_TOKEN:", "✅ ЗАДАН" if BOT_TOKEN else "❌ НЕ ЗАДАН")
 print("ENV MOD_CHAT_ID:", MOD_CHAT_ID_RAW if MOD_CHAT_ID_RAW else "❌ НЕ ЗАДАН")
 print("ENV CHANNEL_ID:", CHANNEL_ID_RAW if CHANNEL_ID_RAW else "❌ НЕ ЗАДАН")
-print("ENV SUPABASE_URL:", "✅ ЗАДАН" if SUPABASE_URL else "❌ НЕ ЗАДАН")
-print("ENV SUPABASE_KEY:", "✅ ЗАДАН" if SUPABASE_KEY else "❌ НЕ ЗАДАН")
+print("Канал обсуждений:", COMMENTS_CHANNEL)
 print("=" * 50)
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не задан! Установите переменную окружения BOT_TOKEN")
+    raise ValueError("❌ BOT_TOKEN не задан!")
 
 if not CHANNEL_ID_RAW:
-    raise ValueError("❌ CHANNEL_ID не задан! Установите переменную окружения CHANNEL_ID")
+    raise ValueError("❌ CHANNEL_ID не задан!")
 
 try:
     CHANNEL_ID = int(CHANNEL_ID_RAW)
@@ -116,124 +105,6 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
-
-
-# ---------- ФУНКЦИИ ДЛЯ РЕЙТИНГА И КОММЕНТАРИЕВ ----------
-
-def rating_keyboard(channel_message_id: int, user_rating: int = 0) -> InlineKeyboardMarkup:
-    """Клавиатура для оценки поста"""
-    stars = []
-    for i in range(1, 6):
-        if user_rating >= i:
-            stars.append(InlineKeyboardButton(text="⭐", callback_data=f"rate:{channel_message_id}:{i}"))
-        else:
-            stars.append(InlineKeyboardButton(text="☆", callback_data=f"rate:{channel_message_id}:{i}"))
-    
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            stars,
-            [
-                InlineKeyboardButton(
-                    text="💬 Комментировать",
-                    callback_data=f"comment:{channel_message_id}"
-                ),
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data=f"stats:{channel_message_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✍️ Поделись своей историей",
-                    url="https://t.me/pishiistorii_bot"
-                )
-            ]
-        ]
-    )
-
-
-def comment_confirmation_keyboard(channel_message_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для подтверждения комментария"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Отправить",
-                    callback_data=f"send_comment:{channel_message_id}"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data=f"cancel_comment:{channel_message_id}"
-                )
-            ]
-        ]
-    )
-
-
-def stats_keyboard(channel_message_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для статистики"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад к посту",
-                    callback_data=f"back_to_post:{channel_message_id}"
-                )
-            ]
-        ]
-    )
-
-
-async def update_post_with_rating(channel_message_id: int):
-    """Обновляет пост в канале с текущим рейтингом"""
-    if channel_message_id not in post_ratings:
-        return
-    
-    post_data = post_ratings[channel_message_id]
-    rating_count = post_data['rating_count']
-    total_score = post_data['total_score']
-    
-    if rating_count > 0:
-        avg_rating = total_score / rating_count
-        rating_text = f"\n\n⭐ Рейтинг: {avg_rating:.1f}/5 ({rating_count} оценок)"
-        
-        try:
-            message = await bot.get_message(CHANNEL_ID, channel_message_id)
-            current_text = message.caption or message.text
-            
-            # Убираем старый рейтинг если есть
-            lines = current_text.split('\n')
-            if '⭐ Рейтинг:' in lines[-1]:
-                lines = lines[:-1]
-            
-            new_text = '\n'.join(lines) + rating_text
-            
-            # Обновляем сообщение
-            if message.photo:
-                await message.edit_caption(new_text, reply_markup=rating_keyboard(channel_message_id))
-            else:
-                await message.edit_text(new_text, reply_markup=rating_keyboard(channel_message_id))
-                
-        except Exception as e:
-            print(f"❌ Ошибка обновления рейтинга: {e}")
-
-
-async def send_comment_notification(channel_message_id: int, user_id: int, comment: str, username: str):
-    """Отправляет уведомление о новом комментарии в чат модерации"""
-    if MOD_CHAT_ID:
-        try:
-            post_link = f"https://t.me/c/{str(CHANNEL_ID)[4:]}/{channel_message_id}"
-            
-            notification = (
-                f"💬 Новый комментарий\n"
-                f"К посту: {post_link}\n"
-                f"От: @{username} (id {user_id})\n"
-                f"Комментарий: {comment}"
-            )
-            
-            await bot.send_message(MOD_CHAT_ID, notification)
-        except Exception as e:
-            print(f"❌ Ошибка отправки уведомления о комментарии: {e}")
 
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ SUPABASE ----------
@@ -296,35 +167,6 @@ async def save_story_part_to_supabase(part: StoryPart) -> Optional[int]:
         return None
 
 
-async def save_rating_to_supabase(channel_message_id: int, user_id: int, rating: int):
-    """Сохраняет оценку в Supabase"""
-    if not SUPABASE_ENABLED:
-        return None
-    
-    payload = {
-        "channel_message_id": channel_message_id,
-        "user_id": user_id,
-        "rating": rating,
-        "timestamp": time.time(),
-    }
-    return await supabase_request("POST", "/rest/v1/ratings", json=payload)
-
-
-async def save_comment_to_supabase(channel_message_id: int, user_id: int, username: str, comment: str):
-    """Сохраняет комментарий в Supabase"""
-    if not SUPABASE_ENABLED:
-        return None
-    
-    payload = {
-        "channel_message_id": channel_message_id,
-        "user_id": user_id,
-        "username": username,
-        "comment": comment,
-        "timestamp": time.time(),
-    }
-    return await supabase_request("POST", "/rest/v1/comments", json=payload)
-
-
 # ---------- СЛУЖЕБНЫЕ ФУНКЦИИ ----------
 
 def moderation_keyboard(user_id: int, part_index: int = None) -> InlineKeyboardMarkup:
@@ -357,6 +199,26 @@ def moderation_keyboard(user_id: int, part_index: int = None) -> InlineKeyboardM
                     text="🚀 Опубликовать всё",
                     callback_data=f"publish_all:{user_id}",
                 ),
+            ]
+        ]
+    )
+
+
+def post_keyboard(channel_message_id: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура для поста в канале (ссылка на обсуждение)"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Обсудить в группе",
+                    url=f"https://t.me/comments_group_108"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Поделись своей историей",
+                    url="https://t.me/pishiistorii_bot"
+                )
             ]
         ]
     )
@@ -417,38 +279,25 @@ async def send_part_to_moderation(part_data: dict, is_first: bool = False):
 async def publish_single_post(text: str, photo_file_id: Optional[str], username: str, user_id: int) -> int:
     """Публикует одиночный пост в канал и возвращает message_id"""
     try:
+        # Добавляем приписку для реакций
+        reaction_text = "\n\n🙏 ❤️ 👍 ✨ 🙌"
+        full_text = text + reaction_text
+        
         if photo_file_id:
             msg = await bot.send_photo(
                 CHANNEL_ID,
                 photo=photo_file_id,
-                caption=text if text else None,
-                reply_markup=rating_keyboard(0),  # Временный ID
+                caption=full_text if text else None,
+                reply_markup=post_keyboard(),
                 parse_mode=ParseMode.HTML,
             )
         else:
             msg = await bot.send_message(
                 CHANNEL_ID,
-                text,
-                reply_markup=rating_keyboard(0),  # Временный ID
+                full_text,
+                reply_markup=post_keyboard(),
                 parse_mode=ParseMode.HTML,
             )
-        
-        # Инициализируем запись рейтинга
-        post_ratings[msg.message_id] = {
-            'ratings': {},
-            'comments': [],
-            'total_score': 0,
-            'rating_count': 0
-        }
-        
-        # Обновляем клавиатуру с правильным ID
-        try:
-            if msg.photo:
-                await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
-            else:
-                await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
-        except Exception as e:
-            print(f"⚠️ Ошибка обновления клавиатуры: {e}")
         
         print(f"✅ Опубликован одиночный пост от user_id={user_id}, message_id={msg.message_id}")
         return msg.message_id
@@ -482,33 +331,36 @@ async def publish_all_parts(user_id: int) -> List[int]:
             
             # Добавляем номер части в начало
             part_header = f"<b>Часть {part['index']}</b>\n\n" if len(sorted_parts) > 1 else ""
-            full_text = part_header + text
             
-            # Для последней части добавляем клавиатуру с оценкой
+            # Для последней части добавляем приписку для реакций
             is_last_part = (part['index'] == len(sorted_parts))
+            reaction_text = "\n\n🙏 ❤️ 👍 ✨ 🙌" if is_last_part else ""
             
-            if photo_file_id:
-                if is_last_part:
+            full_text = part_header + text + reaction_text
+            
+            # Для последней части добавляем клавиатуру
+            if is_last_part:
+                if photo_file_id:
                     msg = await bot.send_photo(
                         CHANNEL_ID,
                         photo=photo_file_id,
                         caption=full_text if text else None,
-                        reply_markup=rating_keyboard(0),  # 0 - временный ID
+                        reply_markup=post_keyboard(),
                         parse_mode=ParseMode.HTML,
                     )
                 else:
+                    msg = await bot.send_message(
+                        CHANNEL_ID,
+                        full_text,
+                        reply_markup=post_keyboard(),
+                        parse_mode=ParseMode.HTML,
+                    )
+            else:
+                if photo_file_id:
                     msg = await bot.send_photo(
                         CHANNEL_ID,
                         photo=photo_file_id,
                         caption=full_text if text else None,
-                        parse_mode=ParseMode.HTML,
-                    )
-            else:
-                if is_last_part:
-                    msg = await bot.send_message(
-                        CHANNEL_ID,
-                        full_text,
-                        reply_markup=rating_keyboard(0),  # 0 - временный ID
                         parse_mode=ParseMode.HTML,
                     )
                 else:
@@ -519,28 +371,6 @@ async def publish_all_parts(user_id: int) -> List[int]:
                     )
             
             published_message_ids.append(msg.message_id)
-            
-            # Сохраняем channel_message_id в буфере
-            part['channel_message_id'] = msg.message_id
-            
-            # Для последнего сообщения инициализируем рейтинг
-            if is_last_part:
-                post_ratings[msg.message_id] = {
-                    'ratings': {},
-                    'comments': [],
-                    'total_score': 0,
-                    'rating_count': 0
-                }
-                
-                # Обновляем клавиатуру с правильным ID
-                try:
-                    if msg.photo:
-                        await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
-                    else:
-                        await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
-                except Exception as e:
-                    print(f"⚠️ Ошибка обновления клавиатуры: {e}")
-            
             print(f"✅ Опубликована часть {part['index']}, message_id={msg.message_id}")
             
             if len(published_message_ids) < len(sorted_parts):
@@ -558,243 +388,13 @@ async def publish_all_parts(user_id: int) -> List[int]:
         await bot.send_message(
             chat_id=user_id,
             text=f"✨ Твоя история ({len(sorted_parts)} частей) опубликована в канале!\n"
-                 f"Под ней есть кнопки для оценки и комментариев.",
+                 f"Под ней есть кнопка для обсуждения в группе.",
         )
         print(f"✅ Уведомлён автор {user_id}")
     except Exception as e:
         print(f"❌ Не удалось уведомить автора: {e}")
     
     return published_message_ids
-
-
-# ---------- ХЕНДЛЕРЫ РЕЙТИНГА И КОММЕНТАРИЕВ ----------
-
-@router.callback_query(F.data.startswith("rate:"))
-async def cb_rate(call: CallbackQuery):
-    """Обработка оценки поста"""
-    await call.answer()
-    
-    try:
-        _, channel_msg_id_str, rating_str = call.data.split(":")
-        channel_message_id = int(channel_msg_id_str)
-        rating = int(rating_str)
-    except:
-        return
-    
-    user_id = call.from_user.id
-    
-    # Сохраняем оценку
-    if channel_message_id in post_ratings:
-        post_data = post_ratings[channel_message_id]
-        
-        # Если пользователь уже оценивал, убираем старую оценку
-        if user_id in post_data['ratings']:
-            old_rating = post_data['ratings'][user_id]
-            post_data['total_score'] -= old_rating
-            post_data['rating_count'] -= 1
-        
-        # Добавляем новую оценку
-        post_data['ratings'][user_id] = rating
-        post_data['total_score'] += rating
-        post_data['rating_count'] += 1
-        
-        # Обновляем пост
-        await update_post_with_rating(channel_message_id)
-        
-        # Сохраняем в Supabase
-        if SUPABASE_ENABLED:
-            await save_rating_to_supabase(channel_message_id, user_id, rating)
-        
-        # Уведомляем пользователя
-        await call.answer(f"Спасибо! Вы поставили {rating} ⭐")
-    else:
-        await call.answer("❌ Пост не найден")
-
-
-@router.callback_query(F.data.startswith("comment:"))
-async def cb_start_comment(call: CallbackQuery):
-    """Начало написания комментария"""
-    await call.answer()
-    
-    try:
-        channel_message_id = int(call.data.split(":")[1])
-    except:
-        return
-    
-    # Просим пользователя написать комментарий
-    await call.message.answer(
-        "💬 Напишите ваш комментарий к этому посту:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    # Сохраняем информацию о том, что пользователь пишет комментарий
-    if call.from_user.id not in user_comments:
-        user_comments[call.from_user.id] = {}
-    user_comments[call.from_user.id][channel_message_id] = ""
-    
-    # Отправляем кнопку отмены
-    await call.message.answer(
-        "Отправьте сообщение с комментарием или нажмите кнопку для отмены:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="❌ Отменить",
-                    callback_data=f"cancel_comment:{channel_message_id}"
-                )]
-            ]
-        )
-    )
-
-
-@router.message(F.text & ~F.text.startswith(("/", "start", "ad")))
-async def handle_comment_text(message: Message):
-    """Обработка текста комментария"""
-    user_id = message.from_user.id
-    
-    # Проверяем, пишет ли пользователь комментарий
-    if user_id in user_comments and user_comments[user_id]:
-        # Берем первый channel_message_id из словаря
-        channel_message_id = next(iter(user_comments[user_id].keys()))
-        
-        # Сохраняем текст комментария
-        user_comments[user_id][channel_message_id] = message.text
-        
-        # Просим подтвердить отправку
-        await message.answer(
-            f"💬 Ваш комментарий:\n\n{message.text}\n\nОтправить?",
-            reply_markup=comment_confirmation_keyboard(channel_message_id)
-        )
-    else:
-        # Это не комментарий, обрабатываем как обычно
-        await handle_story(message)
-
-
-@router.callback_query(F.data.startswith("send_comment:"))
-async def cb_send_comment(call: CallbackQuery):
-    """Отправка комментария"""
-    await call.answer("💬 Комментарий отправлен!")
-    
-    try:
-        channel_message_id = int(call.data.split(":")[1])
-    except:
-        return
-    
-    user_id = call.from_user.id
-    username = call.from_user.username or "anon"
-    
-    if user_id in user_comments and channel_message_id in user_comments[user_id]:
-        comment_text = user_comments[user_id][channel_message_id]
-        
-        if comment_text:
-            # Сохраняем комментарий
-            if channel_message_id in post_ratings:
-                post_ratings[channel_message_id]['comments'].append({
-                    'user_id': user_id,
-                    'username': username,
-                    'text': comment_text,
-                    'timestamp': time.time()
-                })
-            
-            # Сохраняем в Supabase
-            if SUPABASE_ENABLED:
-                await save_comment_to_supabase(channel_message_id, user_id, username, comment_text)
-            
-            # Отправляем уведомление в модерацию
-            await send_comment_notification(channel_message_id, user_id, comment_text, username)
-            
-            # Уведомляем пользователя
-            await call.message.answer("✅ Ваш комментарий сохранен и отправлен на модерацию.")
-        
-        # Очищаем временные данные
-        if user_id in user_comments:
-            if channel_message_id in user_comments[user_id]:
-                del user_comments[user_id][channel_message_id]
-            if not user_comments[user_id]:
-                del user_comments[user_id]
-    else:
-        await call.answer("❌ Комментарий не найден")
-
-
-@router.callback_query(F.data.startswith("cancel_comment:"))
-async def cb_cancel_comment(call: CallbackQuery):
-    """Отмена комментария"""
-    await call.answer("❌ Комментарий отменен")
-    
-    try:
-        channel_message_id = int(call.data.split(":")[1])
-    except:
-        return
-    
-    user_id = call.from_user.id
-    
-    # Очищаем временные данные
-    if user_id in user_comments and channel_message_id in user_comments[user_id]:
-        del user_comments[user_id][channel_message_id]
-        if not user_comments[user_id]:
-            del user_comments[user_id]
-    
-    await call.message.answer("Комментарий отменен.")
-
-
-@router.callback_query(F.data.startswith("stats:"))
-async def cb_show_stats(call: CallbackQuery):
-    """Показать статистику поста"""
-    await call.answer()
-    
-    try:
-        channel_message_id = int(call.data.split(":")[1])
-    except:
-        return
-    
-    if channel_message_id not in post_ratings:
-        await call.message.answer("Статистика пока недоступна для этого поста.")
-        return
-    
-    post_data = post_ratings[channel_message_id]
-    rating_count = post_data['rating_count']
-    total_score = post_data['total_score']
-    comment_count = len(post_data['comments'])
-    
-    if rating_count > 0:
-        avg_rating = total_score / rating_count
-        rating_text = f"⭐ Средний рейтинг: {avg_rating:.1f}/5\n👥 Количество оценок: {rating_count}"
-    else:
-        rating_text = "⭐ Пока нет оценок"
-    
-    stats_text = (
-        f"📊 Статистика поста:\n\n"
-        f"{rating_text}\n"
-        f"💬 Комментариев: {comment_count}"
-    )
-    
-    await call.message.answer(stats_text, reply_markup=stats_keyboard(channel_message_id))
-
-
-@router.callback_query(F.data.startswith("back_to_post:"))
-async def cb_back_to_post(call: CallbackQuery):
-    """Вернуться к посту"""
-    await call.answer()
-    
-    try:
-        channel_message_id = int(call.data.split(":")[1])
-    except:
-        return
-    
-    # Получаем ссылку на пост
-    post_link = f"https://t.me/c/{str(CHANNEL_ID)[4:]}/{channel_message_id}"
-    
-    await call.message.answer(
-        f"🔗 Ссылка на пост: {post_link}\n\n"
-        f"Вы можете вернуться в канал, чтобы оценить пост или оставить комментарий.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="📋 Открыть пост",
-                    url=post_link
-                )]
-            ]
-        )
-    )
 
 
 # ---------- ХЕНДЛЕРЫ ПОЛЬЗОВАТЕЛЬЯ ----------
@@ -804,10 +404,9 @@ async def cmd_start(message: Message):
     start_text = (
         "🌟 Добро пожаловать в бот историй!\n\n"
         "📝 Здесь ты можешь поделиться своей историей.\n"
-        "🎯 В канале под каждой историей есть кнопки:\n"
-        "• ⭐ - Оценить историю (от 1 до 5 звезд)\n"
-        "• 💬 - Оставить комментарий\n"
-        "• 📊 - Посмотреть статистику\n\n"
+        "🎯 После публикации в канале:\n"
+        "• Нажми на эмодзи под постом (🙏 ❤️ 👍 ✨ 🙌)\n"
+        "• Нажми на кнопку 💬 для обсуждения в группе\n\n"
         "Присылай свою историю - она появится в канале после модерации!"
     )
     await message.answer(start_text)
@@ -824,10 +423,13 @@ async def cmd_ad(message: Message):
             await message.answer("❌ После /ad напиши текст объявления.")
             return
             
+        reaction_text = "\n\n🙏 ❤️ 👍 ✨ 🙌"
+        full_ad_text = ad_text + reaction_text
+        
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo.file_id,
-            caption=f"📢 <b>Реклама</b>\n\n{ad_text}",
+            caption=f"📢 <b>Реклама</b>\n\n{full_ad_text}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
                     text="✍️ Поделись своей историей",
@@ -856,9 +458,12 @@ async def cmd_ad(message: Message):
         await message.answer("❌ После /ad напиши текст объявления.")
         return
 
+    reaction_text = "\n\n🙏 ❤️ 👍 ✨ 🙌"
+    full_ad_text = ad_text + reaction_text
+    
     await bot.send_message(
         CHANNEL_ID,
-        f"📢 <b>Реклама</b>\n\n{ad_text}",
+        f"📢 <b>Реклама</b>\n\n{full_ad_text}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="✍️ Поделись своей историей",
@@ -898,11 +503,6 @@ async def handle_story(message: Message):
     text = message.caption or message.text or ""
     has_photo = message.photo is not None
     photo_file_id = message.photo[-1].file_id if has_photo else None
-    
-    # Проверяем, не пишет ли пользователь комментарий
-    if user_id in user_comments and user_comments[user_id]:
-        # Это комментарий, обрабатываем в другом месте
-        return
     
     # Ограничение по времени для обычных пользователей
     if user.id != ADMIN_USER_ID:
@@ -1077,7 +677,7 @@ async def cb_publish_all(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve_single(call: CallbackQuery):
-    """Одобрение одиночного поста (старая система)"""
+    """Одобрение одиночного поста"""
     await call.answer("✅ Пост одобрен и опубликован!")
     
     try:
@@ -1093,14 +693,13 @@ async def cb_approve_single(call: CallbackQuery):
     text = message.caption or message.text or ""
     photo_file_id = None
     
-    # Извлекаем user_id из текста (ищем строку "(id XXXXX)")
+    # Извлекаем user_id из текста
     extracted_user_id = extract_user_id_from_moderation_text(text)
     if extracted_user_id:
         user_id = extracted_user_id
     
     # Убираем заголовок модерации
     lines = text.split('\n')
-    # Ищем строку с временем, после которой начинается сам текст
     content_start = 0
     for i, line in enumerate(lines):
         if line.startswith('Время:'):
@@ -1136,7 +735,7 @@ async def cb_approve_single(call: CallbackQuery):
             await bot.send_message(
                 chat_id=user_id,
                 text="✨ Твоя история прошла модерацию и опубликована в канале!\n"
-                     f"Под ней есть кнопки для оценки и комментариев.",
+                     f"Под ней есть кнопка для обсуждения в группе.",
             )
             print(f"✅ Уведомлён автор {user_id}")
         except Exception as e:
@@ -1149,7 +748,7 @@ async def cb_approve_single(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("reject:"))
 async def cb_reject_single(call: CallbackQuery):
-    """Отклонение одиночного поста (старая система)"""
+    """Отклонение одиночного поста"""
     await call.answer("❌ Пост отклонен")
     
     try:
@@ -1275,10 +874,9 @@ async def main():
     print("=" * 50)
     print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print(f"📺 Канал ID: {CHANNEL_ID}")
+    print(f"📺 Канал публикаций: {CHANNEL_ID}")
+    print(f"💬 Канал обсуждений: {COMMENTS_CHANNEL}")
     print(f"🛡️ Модерация ID: {MOD_CHAT_ID or 'НЕ ЗАДАН'}")
-    print(f"⭐ Система оценок и комментариев: ВКЛЮЧЕНА")
-    print(f"⚙️ Supabase: {'✅ ВКЛЮЧЕН' if SUPABASE_ENABLED else '❌ ОТКЛЮЧЕН'}")
     print("=" * 50)
     print("✅ ГОТОВ К РАБОТЕ!")
     print("=" * 50)
