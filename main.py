@@ -26,17 +26,16 @@ class UserStory:
         self.messages: List[Dict] = []  # список сообщений
         self.moderation_msg_id: Optional[int] = None  # ID кнопок в модерации
         self.timestamp = time.time()
-        self.is_sending = False  # флаг отправки в модерацию
-        self.is_complete = False  # флаг завершения истории
+        self.task: Optional[asyncio.Task] = None  # задача отправки на модерацию
 
 user_stories: Dict[int, UserStory] = {}  # user_id -> UserStory
+last_story_time: Dict[int, float] = {}  # user_id -> время последней истории
 
 
 # ---------- НАСТРОЙКИ ----------
 
 ADMIN_USER_ID = 318289611
 LIMIT_SECONDS = 2 * 24 * 60 * 60
-last_story_time: Dict[int, float] = {}
 
 
 # ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
@@ -118,16 +117,14 @@ def channel_keyboard() -> InlineKeyboardMarkup:
 
 
 async def send_story_to_moderation(user_id: int):
-    """Отправляет ВСЮ историю пользователя в модерацию одним блоком"""
+    """Отправляет историю пользователя в модерацию одним блоком"""
     if not MOD_CHAT_ID or user_id not in user_stories:
         return
     
     story = user_stories[user_id]
     
-    if story.is_sending or len(story.messages) == 0:
+    if len(story.messages) == 0:
         return
-    
-    story.is_sending = True
     
     print(f"📤 Отправка в модерацию: {len(story.messages)} сообщений от user_id={user_id}")
     
@@ -146,7 +143,7 @@ async def send_story_to_moderation(user_id: int):
                         MOD_CHAT_ID,
                         msg_data['text'],
                     )
-                await asyncio.sleep(0.05)  # Минимальная пауза
+                await asyncio.sleep(0.05)
             except Exception as e:
                 print(f"⚠️ Ошибка отправки сообщения: {e}")
         
@@ -161,13 +158,20 @@ async def send_story_to_moderation(user_id: int):
         )
         
         story.moderation_msg_id = footer_msg.message_id
-        story.is_complete = True
         
         print(f"✅ История user_id={user_id} отправлена в модерацию")
         
+        # Отправляем уведомление пользователю
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="✅ История отправлена на модерацию. Ожидайте публикации в канале.",
+            )
+        except Exception:
+            pass
+        
     except Exception as e:
         print(f"❌ Ошибка отправки истории в модерацию: {e}")
-        story.is_sending = False
 
 
 async def publish_to_channel(user_id: int):
@@ -227,8 +231,6 @@ async def publish_to_channel(user_id: int):
     # Удаляем историю из памяти
     if user_id in user_stories:
         del user_stories[user_id]
-    if user_id in last_story_time:
-        del last_story_time[user_id]
     
     # Уведомляем автора
     try:
@@ -304,12 +306,23 @@ async def handle_message(message: Message):
     
     print(f"📨 Сообщение от {user_id} (@{username})")
     
-    # Проверяем лимит времени (кроме админа)
+    # ⚠️ ИСПРАВЛЕНО: Проверяем лимит времени (кроме админа)
+    # Но сбрасываем счетчик, если прошло достаточно времени
+    now = time.time()
+    
     if user_id != ADMIN_USER_ID:
-        now = time.time()
         last_time = last_story_time.get(user_id)
         
-        if last_time and now - last_time < LIMIT_SECONDS:
+        # Если прошло больше 1 часа с последней истории, сбрасываем счетчик
+        if last_time and now - last_time > 3600:  # 1 час
+            print(f"🔄 Сброс счетчика для user_id={user_id} (прошло >1 часа)")
+            last_story_time[user_id] = now
+            # Также очищаем историю, если она есть
+            if user_id in user_stories:
+                del user_stories[user_id]
+        
+        # Проверяем стандартный лимит (2 дня)
+        elif last_time and now - last_time < LIMIT_SECONDS:
             hours_left = int((LIMIT_SECONDS - (now - last_time)) // 3600) + 1
             await message.answer(
                 f"⏳ Ты уже отправлял историю недавно.\n"
@@ -317,10 +330,26 @@ async def handle_message(message: Message):
             )
             return
     
-    # Создаем или получаем историю пользователя
-    if user_id not in user_stories:
+    # ⚠️ ИСПРАВЛЕНО: ВСЕГДА создаем новую историю при первом сообщении
+    # или если прошло больше 5 минут с последнего сообщения
+    should_create_new = True
+    
+    if user_id in user_stories:
+        story = user_stories[user_id]
+        time_since_last = now - story.timestamp
+        
+        # Если прошло меньше 5 минут, продолжаем текущую историю
+        if time_since_last < 300:  # 5 минут
+            should_create_new = False
+        else:
+            # Прошло больше 5 минут - создаем новую историю
+            print(f"🆕 Новая история для user_id={user_id} (прошло >5 минут)")
+            # Старую историю отбрасываем
+            del user_stories[user_id]
+    
+    if should_create_new:
         user_stories[user_id] = UserStory(user_id, username)
-        print(f"🆕 Новая история для user_id={user_id}")
+        print(f"🆕 Создана новая история для user_id={user_id}")
     
     story = user_stories[user_id]
     
@@ -332,44 +361,27 @@ async def handle_message(message: Message):
     }
     
     story.messages.append(msg_data)
+    story.timestamp = now
     
-    # Обновляем таймстемп истории
-    story.timestamp = time.time()
+    # ⚠️ ИСПРАВЛЕНО: УБИРАЕМ ЛИШНИЕ УВЕДОМЛЕНИЯ
+    # Не отправляем "Сообщение X принято" - это лишнее
     
-    # ⚠️ ИСПРАВЛЕНО: ДЛЯ АДМИНА ТОЖЕ НУЖНА МОДЕРАЦИЯ!
-    # Убираем автоматическую публикацию для админа
+    # Отменяем предыдущую задачу отправки, если она есть
+    if story.task and not story.task.done():
+        story.task.cancel()
+        print(f"🔄 Отменена предыдущая задача отправки для user_id={user_id}")
     
-    # Уведомляем пользователя о получении сообщения
-    if len(story.messages) == 1:
-        await message.answer("📝 Сообщение принято. Вы можете продолжить...")
-    else:
-        await message.answer(f"✅ Сообщение {len(story.messages)} принято")
-    
-    # Запускаем таймер для отправки на модерацию
-    # Ждем 5 секунд - если за это время не будет новых сообщений, отправляем на модерацию
-    await asyncio.sleep(5)
-    
-    # Проверяем, не добавились ли новые сообщения за время ожидания
-    current_count = len(story.messages)
-    
-    # Отправляем на модерацию, если:
-    # 1. История еще не отправлена
-    # 2. История не помечена как завершенная
-    # 3. За 5 секунд не пришло новых сообщений
-    if not story.is_complete and not story.is_sending:
-        # Дополнительная проверка: ждем еще 2 секунды для уверенности
-        await asyncio.sleep(2)
-        final_count = len(story.messages)
-        
-        if current_count == final_count:  # Новых сообщений не было
+    # Запускаем новую задачу отправки на модерацию через 3 секунды
+    async def send_after_delay():
+        await asyncio.sleep(3)  # Ждем 3 секунды
+        if user_id in user_stories and user_stories[user_id] is story:
             await send_story_to_moderation(user_id)
-            
             # Обновляем время последней истории
-            last_story_time[user_id] = time.time()
-            
-            await message.answer("✅ История отправлена на модерацию")
-        else:
-            print(f"⏳ user_id={user_id}: получил новые сообщения ({final_count - current_count}), ждем дальше")
+            if user_id != ADMIN_USER_ID:
+                last_story_time[user_id] = time.time()
+    
+    story.task = asyncio.create_task(send_after_delay())
+    print(f"⏰ Запланирована отправка истории user_id={user_id} через 3 секунды")
 
 
 # ---------- ОБРАБОТЧИКИ МОДЕРАЦИИ ----------
@@ -419,8 +431,6 @@ async def cb_reject(call: CallbackQuery):
     # Удаляем историю из памяти
     if user_id in user_stories:
         del user_stories[user_id]
-    if user_id in last_story_time:
-        del last_story_time[user_id]
     
     # Помечаем в модерации
     current_text = call.message.text or ""
@@ -456,10 +466,10 @@ async def main():
     print("=" * 50)
     print("📝 ЛОГИКА РАБОТЫ:")
     print("1. Пользователь пишет сообщения")
-    print("2. Бот ждет 5 секунд после последнего сообщения")
-    print("3. Все сообщения отправляются в модерацию одним блоком")
-    print("4. В конце блока - кнопки модерации")
-    print("5. Админ тоже проходит модерацию!")
+    print("2. После 3 секунд тишины - отправка в модерацию")
+    print("3. НЕТ лишних сообщений 'Сообщение X принято'")
+    print("4. Счетчик сбрасывается через 1 час неактивности")
+    print("5. Новая история через 5 минут тишины")
     print("=" * 50)
     
     try:
