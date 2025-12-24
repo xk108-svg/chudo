@@ -105,10 +105,14 @@ def moderation_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def channel_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура под постом в канале - ТОЛЬКО одна кнопка"""
+    """Клавиатура под постом в канале"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(
+                    text="💬 Обсудить",
+                    url=f"https://t.me/comments_group_108"
+                ),
                 InlineKeyboardButton(
                     text="✍️ Поделись своей историей",
                     url="https://t.me/pishiistorii_bot"
@@ -198,49 +202,43 @@ async def publish_to_channel(user_id: int):
     
     print(f"🚀 [{time.time():.3f}] Публикация {len(story.messages)} сообщений от user_id={user_id}")
     
-    # Публикуем ВСЕ сообщения
+    # Публикуем ВСЕ сообщения пользователя
     for i, msg_data in enumerate(story.messages):
         try:
-            is_last = (i == len(story.messages) - 1)
             text = msg_data.get('text', '')
             photo = msg_data.get('photo')
             
-            # Для последнего сообщения добавляем реакции и кнопки
-            if is_last:
-                reactions = "\n\n🙏 ❤️ 👍 ✨ 🙌"
-                full_text = text + reactions if text else reactions
-                
-                if photo:
-                    msg = await bot.send_photo(
-                        CHANNEL_ID,
-                        photo=photo,
-                        caption=full_text if full_text.strip() else None,
-                        reply_markup=channel_keyboard(),  # ✅ Одна кнопка
-                    )
-                else:
-                    msg = await bot.send_message(
-                        CHANNEL_ID,
-                        full_text,
-                        reply_markup=channel_keyboard(),  # ✅ Одна кнопка
-                    )
+            if photo:
+                msg = await bot.send_photo(
+                    CHANNEL_ID,
+                    photo=photo,
+                    caption=text if text else None,
+                )
             else:
-                if photo:
-                    msg = await bot.send_photo(
-                        CHANNEL_ID,
-                        photo=photo,
-                        caption=text if text else None,
-                    )
-                else:
-                    msg = await bot.send_message(
-                        CHANNEL_ID,
-                        text,
-                    )
+                msg = await bot.send_message(
+                    CHANNEL_ID,
+                    text,
+                )
             
             published_ids.append(msg.message_id)
             await asyncio.sleep(0.05)
             
         except Exception as e:
             print(f"❌ Ошибка публикации: {e}")
+    
+    # 🔥 ПОСЛЕ ПОСЛЕДНЕГО СООБЩЕНИЯ ДОБАВЛЯЕМ ОТДЕЛЬНОЕ СООБЩЕНИЕ С РЕАКЦИЯМИ
+    if published_ids:
+        try:
+            # Отправляем отдельное сообщение с реакциями
+            reactions_msg = await bot.send_message(
+                CHANNEL_ID,
+                "🙏 ❤️ 👍 ✨ 🙌",
+                reply_markup=channel_keyboard(),  # Кнопки под реакциями
+            )
+            published_ids.append(reactions_msg.message_id)
+            print(f"✅ Отправлено сообщение с реакциями для user_id={user_id}")
+        except Exception as e:
+            print(f"❌ Ошибка отправки реакций: {e}")
     
     # 🔥 Безопасное удаление истории
     async with user_stories_lock:
@@ -284,22 +282,26 @@ async def cmd_ad(message: Message):
         await message.answer("❌ Напиши текст рекламы")
         return
     
-    reactions = "\n\n🙏 ❤️ 👍 ✨ 🙌"
-    
+    # Реклама публикуется как обычное сообщение + отдельное с реакциями
     if message.reply_to_message and message.reply_to_message.photo:
         photo = message.reply_to_message.photo[-1].file_id
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo,
-            caption=f"📢 <b>Реклама</b>\n\n{ad_text}{reactions}",
-            reply_markup=channel_keyboard(),  # ✅ Одна кнопка
+            caption=f"📢 <b>Реклама</b>\n\n{ad_text}",
         )
     else:
         await bot.send_message(
             CHANNEL_ID,
-            f"📢 <b>Реклама</b>\n\n{ad_text}{reactions}",
-            reply_markup=channel_keyboard(),  # ✅ Одна кнопка
+            f"📢 <b>Реклама</b>\n\n{ad_text}",
         )
+    
+    # Отдельное сообщение с реакциями
+    await bot.send_message(
+        CHANNEL_ID,
+        "🙏 ❤️ 👍 ✨ 🙌",
+        reply_markup=channel_keyboard(),
+    )
     
     await message.answer("✅ Реклама опубликована")
     try:
@@ -485,9 +487,9 @@ async def main():
     print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 50)
     print("📝 ОСОБЕННОСТИ:")
-    print("1. Только одна кнопка под постом: ✍️ Поделись своей историей")
-    print("2. Реакции 🙏 ❤️ 👍 ✨ 🙌 после каждого поста")
-    print("3. Для длинных сообщений - реакции только под последней частью")
+    print("1. Сообщения публикуются как в модерации")
+    print("2. После последнего сообщения - отдельное сообщение с реакциями 🙏 ❤️ 👍 ✨ 🙌")
+    print("3. Под реакциями - 2 кнопки: 💬 Обсудить и ✍️ Поделись историей")
     print("4. Защита от race conditions")
     print("=" * 50)
     print("✅ ГОТОВ К РАБОТЕ")
