@@ -28,7 +28,6 @@ user_stories: Dict[int, List[Dict]] = {}
 USER_BUFFER_SIZE = 10
 
 # 🔥 СИСТЕМА КОММЕНТАРИЕВ И РЕЙТИНГА
-# channel_message_id -> {user_id: rating, comments: []}
 post_ratings: Dict[int, Dict] = defaultdict(lambda: {
     'ratings': {},
     'comments': [],
@@ -36,8 +35,10 @@ post_ratings: Dict[int, Dict] = defaultdict(lambda: {
     'rating_count': 0
 })
 
-# user_id -> {channel_message_id: comment_text}
 user_comments: Dict[int, Dict[int, str]] = defaultdict(dict)
+
+# 🔥 ДЛЯ СТАРОЙ СИСТЕМЫ МОДЕРАЦИИ (одиночные посты)
+moderation_messages: Dict[int, Dict[int, int]] = defaultdict(dict)
 
 
 # ---------- НАСТРОЙКИ ПРОЕКТА ----------
@@ -63,7 +64,7 @@ class StoryPart:
     photo_file_id: Optional[str] = None
     message_id: Optional[int] = None
     timestamp: float = None
-    channel_message_id: Optional[int] = None  # ID сообщения в канале
+    channel_message_id: Optional[int] = None
 
 
 # ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
@@ -187,7 +188,6 @@ async def update_post_with_rating(channel_message_id: int):
         avg_rating = total_score / rating_count
         rating_text = f"\n\n⭐ Рейтинг: {avg_rating:.1f}/5 ({rating_count} оценок)"
         
-        # Получаем текущее сообщение
         try:
             message = await bot.get_message(CHANNEL_ID, channel_message_id)
             current_text = message.caption or message.text
@@ -213,7 +213,6 @@ async def send_comment_notification(channel_message_id: int, user_id: int, comme
     """Отправляет уведомление о новом комментарии в чат модерации"""
     if MOD_CHAT_ID:
         try:
-            # Получаем ссылку на пост
             post_link = f"https://t.me/c/{str(CHANNEL_ID)[4:]}/{channel_message_id}"
             
             notification = (
@@ -402,8 +401,52 @@ async def send_part_to_moderation(part_data: dict, is_first: bool = False):
         return msg.message_id
         
     except Exception as e:
-        print(f"❌ Ошибка отправки в модерацию: {e}")
+        print(f"❌ Ошибка отправки в модерации: {e}")
         return None
+
+
+async def publish_single_post(text: str, photo_file_id: Optional[str], username: str, user_id: int) -> int:
+    """Публикует одиночный пост в канал и возвращает message_id"""
+    try:
+        if photo_file_id:
+            msg = await bot.send_photo(
+                CHANNEL_ID,
+                photo=photo_file_id,
+                caption=text if text else None,
+                reply_markup=rating_keyboard(0),  # Временный ID
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            msg = await bot.send_message(
+                CHANNEL_ID,
+                text,
+                reply_markup=rating_keyboard(0),  # Временный ID
+                parse_mode=ParseMode.HTML,
+            )
+        
+        # Инициализируем запись рейтинга
+        post_ratings[msg.message_id] = {
+            'ratings': {},
+            'comments': [],
+            'total_score': 0,
+            'rating_count': 0
+        }
+        
+        # Обновляем клавиатуру с правильным ID
+        try:
+            if msg.photo:
+                await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
+            else:
+                await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
+        except Exception as e:
+            print(f"Ошибка обновления клавиатуры: {e}")
+        
+        print(f"✅ Опубликован одиночный пост от user_id={user_id}, message_id={msg.message_id}")
+        return msg.message_id
+        
+    except Exception as e:
+        print(f"❌ Ошибка публикации одиночного поста: {e}")
+        raise
 
 
 async def publish_all_parts(user_id: int) -> List[int]:
@@ -432,7 +475,7 @@ async def publish_all_parts(user_id: int) -> List[int]:
             part_header = f"<b>Часть {part['index']}</b>\n\n" if len(sorted_parts) > 1 else ""
             full_text = part_header + text
             
-            # Для последней части добавляем начальную клавиатуру с оценкой
+            # Для последней части добавляем клавиатуру с оценкой
             is_last_part = (part['index'] == len(sorted_parts))
             
             if photo_file_id:
@@ -467,38 +510,35 @@ async def publish_all_parts(user_id: int) -> List[int]:
                     )
             
             published_message_ids.append(msg.message_id)
-            print(f"✅ Опубликована часть {part['index']}, message_id={msg.message_id}")
             
             # Сохраняем channel_message_id в буфере
             part['channel_message_id'] = msg.message_id
+            
+            # Для последнего сообщения инициализируем рейтинг
+            if is_last_part:
+                post_ratings[msg.message_id] = {
+                    'ratings': {},
+                    'comments': [],
+                    'total_score': 0,
+                    'rating_count': 0
+                }
+                
+                # Обновляем клавиатуру с правильным ID
+                try:
+                    if msg.photo:
+                        await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
+                    else:
+                        await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
+                except Exception as e:
+                    print(f"Ошибка обновления клавиатуры: {e}")
+            
+            print(f"✅ Опубликована часть {part['index']}, message_id={msg.message_id}")
             
             if published_message_ids < len(sorted_parts):
                 await asyncio.sleep(0.5)
                 
         except Exception as e:
             print(f"❌ Ошибка публикации части {part.get('index')}: {e}")
-    
-    # Для последнего сообщения обновляем клавиатуру с правильным message_id
-    if published_message_ids:
-        last_message_id = published_message_ids[-1]
-        
-        # Инициализируем запись рейтинга
-        post_ratings[last_message_id] = {
-            'ratings': {},
-            'comments': [],
-            'total_score': 0,
-            'rating_count': 0
-        }
-        
-        # Обновляем клавиатуру с правильным ID
-        try:
-            last_message = await bot.get_message(CHANNEL_ID, last_message_id)
-            if last_message.photo:
-                await last_message.edit_reply_markup(reply_markup=rating_keyboard(last_message_id))
-            else:
-                await last_message.edit_reply_markup(reply_markup=rating_keyboard(last_message_id))
-        except Exception as e:
-            print(f"Ошибка обновления клавиатуры: {e}")
     
     # Очищаем буфер
     if user_id in user_stories:
@@ -799,7 +839,7 @@ async def cmd_ad(message: Message):
         try:
             await confirm.delete()
         except:
-            pass
+        pass
         return
 
     ad_text = message.text[4:].strip()
@@ -942,10 +982,282 @@ async def handle_story(message: Message):
         )
 
 
-# ---------- ОБРАБОТЧИКИ МОДЕРАЦИИ (остаются как были) ----------
+# ---------- ОБРАБОТЧИКИ МОДЕРАЦИИ ----------
 
-# ... (оставьте обработчики cb_approve_part, cb_reject_part, cb_show_parts, cb_publish_all без изменений)
-# Они остаются такими же, как в предыдущей версии кода
+@router.callback_query(F.data.startswith("approve_part:"))
+async def cb_approve_part(call: CallbackQuery):
+    """Одобрение отдельной части"""
+    await call.answer("✅ Часть одобрена!")
+    
+    try:
+        _, user_id_str, part_index_str = call.data.split(":")
+        user_id = int(user_id_str)
+        part_index = int(part_index_str)
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    print(f"✅ Одобрена часть {part_index} от user_id={user_id}")
+    
+    # Обновляем статус в буфере
+    if user_id in user_stories:
+        for part in user_stories[user_id]:
+            if part.get('index') == part_index:
+                part['status'] = 'approved'
+                print(f"📊 Статус части {part_index} обновлен на 'approved'")
+                break
+    
+    # Помечаем в модерации
+    current_text = call.message.caption or call.message.text or ""
+    new_text = current_text + "\n\n✅ <b>Часть одобрена</b>"
+    
+    try:
+        if call.message.photo:
+            await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Ошибка редактирования: {e}")
+    
+    # Проверяем, все ли части одобрены
+    if user_id in user_stories and user_stories[user_id]:
+        all_approved = all(part.get('status') == 'approved' for part in user_stories[user_id])
+        total_parts = len(user_stories[user_id])
+        approved_parts = sum(1 for part in user_stories[user_id] if part.get('status') == 'approved')
+        
+        print(f"📊 Проверка одобрения: {approved_parts}/{total_parts} частей одобрено")
+        
+        if all_approved:
+            await call.message.answer(
+                f"🎉 Все {total_parts} части истории от user_id={user_id} одобрены!\n"
+                f"Нажмите '🚀 Опубликовать всё' для публикации."
+            )
+
+
+@router.callback_query(F.data.startswith("publish_all:"))
+async def cb_publish_all(call: CallbackQuery):
+    """Публикация всех частей"""
+    await call.answer("🔄 Публикую...")
+    
+    try:
+        user_id = int(call.data.split(":")[1])
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    # Публикуем все части
+    message_ids = await publish_all_parts(user_id)
+    
+    if message_ids:
+        # Помечаем сообщение модерации как опубликованное
+        current_text = call.message.caption or call.message.text or ""
+        new_text = current_text + "\n\n🚀 <b>ВСЕ ЧАСТИ ОПУБЛИКОВАНЫ</b>"
+        
+        try:
+            if call.message.photo:
+                await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
+            else:
+                await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"Ошибка редактирования: {e}")
+        
+        await call.message.answer(f"✅ Все части истории от user_id={user_id} опубликованы!")
+    else:
+        await call.message.answer(f"❌ Не удалось опубликовать историю user_id={user_id}")
+
+
+@router.callback_query(F.data.startswith("approve:"))
+async def cb_approve_single(call: CallbackQuery):
+    """Одобрение одиночного поста (старая система)"""
+    await call.answer("✅ Пост одобрен и опубликован!")
+    
+    try:
+        user_id = int(call.data.split(":")[1])
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    print(f"✅ Одобрен одиночный пост от user_id={user_id}")
+    
+    # Получаем текст и фото из сообщения модерации
+    message = call.message
+    text = message.caption or message.text or ""
+    photo_file_id = None
+    
+    # Извлекаем user_id из текста (ищем строку "(id XXXXX)")
+    extracted_user_id = extract_user_id_from_moderation_text(text)
+    if extracted_user_id:
+        user_id = extracted_user_id
+    
+    # Убираем заголовок модерации
+    lines = text.split('\n')
+    # Ищем строку с временем, после которой начинается сам текст
+    content_start = 0
+    for i, line in enumerate(lines):
+        if line.startswith('Время:'):
+            content_start = i + 1
+            break
+    
+    # Берем только контент
+    content_lines = lines[content_start:]
+    clean_text = '\n'.join(content_lines).strip()
+    
+    # Проверяем, есть ли фото
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+    
+    # Публикуем в канал
+    try:
+        channel_message_id = await publish_single_post(clean_text, photo_file_id, "user", user_id)
+        
+        # Помечаем в модерации
+        current_text = message.caption or message.text or ""
+        new_text = current_text + "\n\n✅ <b>Одобрено и опубликовано!</b>"
+        
+        try:
+            if message.photo:
+                await message.edit_caption(new_text, parse_mode=ParseMode.HTML)
+            else:
+                await message.edit_text(new_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"Ошибка редактирования модерации: {e}")
+        
+        # Уведомляем автора
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="✨ Твоя история прошла модерацию и опубликована в канале!\n"
+                     f"Под ней есть кнопки для оценки и комментариев.",
+            )
+            print(f"✅ Уведомлён автор {user_id}")
+        except Exception as e:
+            print(f"❌ Не удалось уведомить автора: {e}")
+            
+    except Exception as e:
+        print(f"❌ Ошибка публикации: {e}")
+        await call.message.answer(f"❌ Ошибка публикации: {e}")
+
+
+@router.callback_query(F.data.startswith("reject:"))
+async def cb_reject_single(call: CallbackQuery):
+    """Отклонение одиночного поста (старая система)"""
+    await call.answer("❌ Пост отклонен")
+    
+    try:
+        user_id = int(call.data.split(":")[1])
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    print(f"❌ Отклонен одиночный пост от user_id={user_id}")
+    
+    # Помечаем в модерации
+    current_text = call.message.caption or call.message.text or ""
+    new_text = current_text + "\n\n❌ <b>Отклонено</b>"
+    
+    try:
+        if call.message.photo:
+            await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Ошибка редактирования модерации: {e}")
+    
+    # Уведомляем автора
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "Твоя история не прошла модерацию и не была опубликована.\n\n"
+                "Проверь, пожалуйста, чтобы не было политики, брани и оскорблений, "
+                "и попробуй пересказать её чуть мягче."
+            ),
+        )
+    except Exception as e:
+        print("Cannot notify user:", e)
+
+
+@router.callback_query(F.data.startswith("reject_part:"))
+async def cb_reject_part(call: CallbackQuery):
+    """Отклонение части"""
+    await call.answer("❌ Часть отклонена")
+    
+    try:
+        _, user_id_str, part_index_str = call.data.split(":")
+        user_id = int(user_id_str)
+        part_index = int(part_index_str)
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    print(f"❌ Отклонена часть {part_index} от user_id={user_id}")
+    
+    # Удаляем часть из буфера
+    if user_id in user_stories:
+        user_stories[user_id] = [p for p in user_stories[user_id] if p.get('index') != part_index]
+        # Перенумеровываем оставшиеся части
+        for i, part in enumerate(user_stories[user_id], 1):
+            part['index'] = i
+    
+    # Помечаем в модерации
+    current_text = call.message.caption or call.message.text or ""
+    new_text = current_text + "\n\n❌ <b>Часть отклонена</b>"
+    
+    try:
+        if call.message.photo:
+            await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Ошибка редактирования: {e}")
+    
+    # Уведомляем пользователя об отклонении части
+    try:
+        await bot.send_message(
+            user_id,
+            f"❌ Часть {part_index} твоей истории не прошла модерацию.\n"
+            f"Ты можешь прислать исправленный вариант этой части."
+        )
+    except Exception as e:
+        print(f"Не удалось уведомить пользователя: {e}")
+
+
+@router.callback_query(F.data.startswith("show_parts:"))
+async def cb_show_parts(call: CallbackQuery):
+    """Показать все части"""
+    await call.answer()
+    
+    try:
+        user_id = int(call.data.split(":")[1])
+    except:
+        await call.message.answer("❌ Ошибка в данных")
+        return
+    
+    if user_id not in user_stories or not user_stories[user_id]:
+        await call.answer("❌ Нет сохраненных частей")
+        return
+    
+    parts_info = []
+    for part in user_stories[user_id]:
+        status = "✅" if part.get('status') == 'approved' else "⏳"
+        text_preview = part['text'][:50] + "..." if len(part['text']) > 50 else part['text']
+        parts_info.append(f"{status} Часть {part['index']}: {text_preview}")
+    
+    summary = f"📚 Все части от user_id={user_id}:\n\n" + "\n".join(parts_info)
+    await call.message.answer(summary)
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
+    """Ищет в тексте строку вида '(id 123456789)' и возвращает число."""
+    m = re.search(r"\(id (\d+)\)", text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
 
 
 # ---------- ЗАПУСК ----------
