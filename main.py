@@ -19,8 +19,9 @@ from aiogram.types import (
 import aiohttp
 
 
-# 🔥 ГЛОБАЛЬНЫЙ БУФЕР ДЛЯ СОХРАНЕНИЯ ЧАСТЕЙ ИСТОРИЙ (по story_id)
-pending_stories: Dict[int, List[Dict]] = {}
+# 🔥 ГЛОБАЛЬНЫЙ БУФЕР ДЛЯ СОХРАНЕНИЯ ЧАСТЕЙ ИСТОРИЙ ПО USER_ID
+user_stories: Dict[int, List[Dict]] = {}
+USER_BUFFER_SIZE = 3  # максимум 3 части от одного пользователя
 
 
 # ---------- НАСТРОЙКИ ПРОЕКТА ----------
@@ -154,17 +155,18 @@ async def delete_story_from_supabase(story_id: int) -> bool:
 
 # ---------- СЛУЖЕБНЫЕ ФУНКЦИИ ----------
 
-def moderation_keyboard(story_id: int) -> InlineKeyboardMarkup:
+def moderation_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Кнопки модерации с user_id вместо story_id"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Одобрить",
-                    callback_data=f"approve:{story_id}",
+                    callback_data=f"approve:{user_id}",
                 ),
                 InlineKeyboardButton(
                     text="❌ Отклонить",
-                    callback_data=f"reject:{story_id}",
+                    callback_data=f"reject:{user_id}",
                 ),
             ]
         ]
@@ -316,136 +318,132 @@ async def cmd_ad(message: Message):
         pass
 
 
-# ✅ ХЕНДЛЕР — ЛОВИТ ВСЁ ОТ ВСЕХ + СОХРАНЕНИЕ ЧАСТЕЙ ДЛЯ СКЛЕЙКИ
+# 🔥 ОСНОВНОЙ ХЕНДЛЕР + БУФЕР ПО USER_ID
 @router.message(
     (F.photo & ~F.reply_to_message) | 
     (F.text & ~F.text.startswith(("/ad", "/start")))
 )
 async def handle_story(message: Message):
     """
-    ✅ ЛОВИТ ВСЁ ОТ ТЕБЯ И ПОЛЬЗОВАТЕЛЕЙ:
-    * Фото без текста (ты отклоняешь ❌)
+    ✅ ЛОВИТ ВСЁ ОТ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ:
+    * Фото без текста
     * Фото + текст  
-    * Просто текст
-    * Длинные тексты (Telegram разбивает на части)
+    * Просто текст (короткий/длинный)
     
-    ✅ СОХРАНЯЕТ КАЖДУЮ ЧАСТЬ ПО story_id ДЛЯ ПОСЛЕДУЮЩЕЙ СКЛЕЙКИ
+    ✅ СОХРАНЯЕТ ПОСЛЕДНИЕ 3 СООБЩЕНИЯ ОТ КАЖДОГО ПОЛЬЗОВАТЕЛЯ ДЛЯ СКЛЕЙКИ
     """
     print(f"📨 ЛОВИМ: {message.from_user.id} | len={len(message.text or message.caption or '')}")
     
     user = message.from_user
+    user_id = user.id
 
-    # Ограничение ТОЛЬКО для пользователей (ты без лимита)
+    # Ограничение ТОЛЬКО для пользователей (админ без лимита)
     if user.id != ADMIN_USER_ID:
         now = time.time()
-        last_ts = last_story_ts.get(user.id)
+        last_ts = last_story_ts.get(user_id)
         if last_ts and now - last_ts < LIMIT_SECONDS:
             hours_left = int((LIMIT_SECONDS - (now - last_ts)) // 3600) + 1
             await message.answer(
-                "Ты уже делился историей недавно.\n"
+                f"⏳ Ты уже делился историей недавно.\n"
                 f"Пожалуйста, приходи с новой историей через примерно {hours_left} ч."
             )
             return
-        last_story_ts[user.id] = now
+        last_story_ts[user_id] = now
 
-    # Определяем тип контента
+    # 🔥 БУФЕР ПО USER_ID — СОХРАНЯЕМ ВСЕ ПОСЛЕДНИЕ СООБЩЕНИЯ
+    text = message.caption or message.text or ""
     has_photo = message.photo is not None
-    has_text = (message.text is not None) or (message.caption is not None)
+    photo_file_id = message.photo[-1].file_id if has_photo else None
     
-    if has_photo:
-        photo = message.photo[-1]
-        text = message.caption or ""
-        story_type = "photo"
-        photo_file_id = photo.file_id
-    else:
-        text = message.text or ""
-        story_type = "text"
-        photo_file_id = None
+    if user_id not in user_stories:
+        user_stories[user_id] = []
+    
+    # Добавляем в буфер
+    user_stories[user_id].append({
+        'text': text,
+        'photo': photo_file_id,
+        'username': user.username or "anon",
+        'timestamp': time.time()
+    })
+    
+    # Ограничиваем размер буфера (последние 3 сообщения)
+    if len(user_stories[user_id]) > USER_BUFFER_SIZE:
+        user_stories[user_id] = user_stories[user_id][-USER_BUFFER_SIZE:]
+    
+    print(f"🔗 User {user_id}: {len(user_stories[user_id])} частей в буфере")
 
+    # Сохраняем в Supabase
+    story_type = "photo" if has_photo else "text"
     story = Story(
         id=None,
-        user_id=user.id,
+        user_id=user_id,
         username=user.username or "anon",
         text=text,
         type=story_type,
         photo_file_id=photo_file_id,
     )
-
     story_id = await save_story_to_supabase(story)
-    
-    # 🔥 СОХРАНЯЕМ ЭТУ ЧАСТЬ В ГЛОБАЛЬНЫЙ БУФЕР ПО story_id
-    if story_id:
-        if story_id not in pending_stories:
-            pending_stories[story_id] = []
-        pending_stories[story_id].append({
-            'text': text,
-            'photo': photo_file_id if has_photo else None
-        })
-        print(f"🔗 Сохранена часть {len(pending_stories[story_id])} для story_id={story_id}")
 
     await message.answer("История отправлена на модерацию ✅")
 
-    # Шлём модераторам ВСЕ истории
+    # Шлём модераторам
     if MOD_CHAT_ID:
-        supabase_mark = f"ID в БД: {story_id}" if story_id else "⚠️ Ошибка БД"
-        
-        # Показываем тип контента
-        content_type = "📷 Только фото" if has_photo and not has_text else \
+        content_type = "📷 Только фото" if has_photo and not text else \
                       "📷 Фото + текст" if has_photo else "📝 Текст"
+        parts_count = len(user_stories[user_id])
         
         header = (
             f"🆕 Новая история\n"
             f"Тип: {content_type}\n"
-            f"Автор: @{story.username} (id {story.user_id})\n"
-            f"{supabase_mark}\n\n"
+            f"Автор: @{story.username} (id {user_id})\n"
+            f"🔗 Части в буфере: {parts_count}\n"
+            f"ID БД: {story_id or 'нет'}\n\n"
         )
 
-        kb = moderation_keyboard(story_id or 0)
+        kb = moderation_keyboard(user_id)  # 🔥 user_id вместо story_id!
 
         try:
-            if story_type == "photo":
+            if has_photo:
                 await bot.send_photo(
                     MOD_CHAT_ID,
                     photo=photo_file_id,
                     caption=header + text,
                     reply_markup=kb,
                 )
-                print(f"✅ ОТПРАВЛЕНО В МОД: фото + {len(text)} символов (story_id={story_id})")
+                print(f"✅ ОТПРАВЛЕНО В МОД: фото + {len(text)} симв. (user_id={user_id})")
             else:
                 await bot.send_message(
                     MOD_CHAT_ID,
                     header + text,
                     reply_markup=kb,
                 )
-                print(f"✅ ОТПРАВЛЕНО В МОД: текст {len(text)} символов (story_id={story_id})")
+                print(f"✅ ОТПРАВЛЕНО В МОД: текст {len(text)} симв. (user_id={user_id})")
         except Exception as e:
             print(f"❌ ОШИБКА ОТПРАВКИ В МОД: {e}")
-    else:
-        print("SKIP: нет MOD_CHAT_ID, модераторам не отправлено")
 
 
-# ---------- 🔥 ИСПРАВЛЕННАЯ МОДЕРАЦИЯ СО СКЛЕЙКОЙ ЧАСТЕЙ ----------
-
+# 🔥 МОДЕРАЦИЯ СО СКЛЕЙКОЙ ПО USER_ID
 @router.callback_query(F.data.startswith("approve:"))
 async def cb_approve(call: CallbackQuery):
     await call.answer()
 
+    # 🔥 Парсим user_id из callback_data
     payload = call.data.split(":", 1)[1]
     try:
-        story_id = int(payload)
+        user_id = int(payload)
     except ValueError:
-        await call.message.answer("Ошибка: некорректный ID истории.")
+        await call.message.answer("Ошибка: некорректный ID пользователя.")
         return
 
-    print(f"✅ ОДОБРЯЕМ story_id={story_id}")
+    print(f"✅ ОДОБРЯЕМ user_id={user_id}")
     
-    # 🔥 🔥 ИСПРАВЛЕННАЯ СКЛЕЙКА — РАБОТАЕТ ДЛЯ ЛЮБОЙ ЧАСТИ!
+    # 🔥 СКЛЕИВАЕМ ВСЕ ЧАСТИ ПО ЭТОМУ USER_ID!
     full_text = ""
     photo_file_id = None
     
-    if story_id in pending_stories and pending_stories[story_id]:
-        parts = pending_stories[story_id]
-        print(f"🔗 НАЙДЕНО {len(parts)} ЧАСТЕЙ ДЛЯ story_id={story_id}")
+    if user_id in user_stories and user_stories[user_id]:
+        parts = user_stories[user_id]
+        print(f"🔗 НАЙДЕНО {len(parts)} ЧАСТЕЙ ОТ user_id={user_id}")
         
         # Собираем ВСЕ тексты и последнее фото
         for part in parts:
@@ -457,30 +455,25 @@ async def cb_approve(call: CallbackQuery):
         full_text = full_text.strip()
         print(f"📝 СКЛЕЕННЫЙ ТЕКСТ: {len(full_text)} символов")
         
-        # 🔥 КРИТИЧНО: очищаем буфер ПОСЛЕ склейки
-        del pending_stories[story_id]
-        print(f"🗑️ БУФЕР ОЧИЩЕН для story_id={story_id}")
+        # 🔥 Очищаем буфер после склейки
+        del user_stories[user_id]
+        print(f"🗑️ БУФЕР ОЧИЩЕН для user_id={user_id}")
     else:
-        # Одиночное сообщение (нет частей для склейки)
+        # Одиночное сообщение
         full_text = call.message.caption or call.message.text or ""
         lines = full_text.split("\n")
-        story_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
-        full_text = story_text
+        full_text = "\n".join(lines[4:]).strip() if len(lines) > 4 else full_text
         photo_file_id = call.message.photo[-1].file_id if call.message.photo else None
         print(f"📝 ОДИНОЧНОЕ: {len(full_text)} символов")
 
-    # Если текста нет (только фото) — публикуем БЕЗ подписи
-    if not full_text:
-        full_text = None
-
-    # ✅ ПУБЛИКАЦИЯ СКЛЕЕННЫМ/ОДИНОЧНЫМ КОНТЕНТОМ
+    # ПУБЛИКАЦИЯ СКЛЕЕННЫМ КОНТЕНТОМ
     try:
         kb = share_your_story_keyboard()
         if photo_file_id:
             await bot.send_photo(
                 CHANNEL_ID,
                 photo=photo_file_id,
-                caption=full_text,
+                caption=full_text or None,
                 reply_markup=kb,
             )
             print("✅ ОПУБЛИКОВАНО: ФОТО + ТЕКСТ")
@@ -503,21 +496,23 @@ async def cb_approve(call: CallbackQuery):
         await call.message.answer(f"❌ Ошибка публикации: {e}")
         return
 
-    # Удаляем запись из Supabase
-    if story_id != 0:
-        deleted = await delete_story_from_supabase(story_id)
-        print("Supabase delete:", deleted)
+    # Удаляем из Supabase (последнюю запись)
+    if SUPABASE_ENABLED:
+        # Удаляем все записи этого пользователя за последние 5 минут
+        five_min_ago = int(time.time() - 300)
+        params = {"user_id": f"eq.{user_id}", "created_at": f"gte.{five_min_ago}"}
+        await supabase_request("DELETE", "/rest/v1/stories", params=params)
 
     # Уведомляем автора
     full_text_for_user_id = call.message.caption or call.message.text or ""
-    user_id = extract_user_id_from_moderation_text(full_text_for_user_id)
-    if user_id:
+    extracted_user_id = extract_user_id_from_moderation_text(full_text_for_user_id)
+    if extracted_user_id:
         try:
             await bot.send_message(
-                chat_id=user_id,
+                chat_id=extracted_user_id,
                 text="✨ Твоя история прошла модерацию и опубликована в канале. Спасибо, что делишься чудом!",
             )
-            print(f"✅ УВЕДОМЛЁН АВТОР: {user_id}")
+            print(f"✅ УВЕДОМЛЁН АВТОР: {extracted_user_id}")
         except Exception as e:
             print("Cannot notify user:", e)
 
@@ -539,26 +534,23 @@ async def cb_reject(call: CallbackQuery):
 
     payload = call.data.split(":", 1)[1]
     try:
-        story_id = int(payload)
+        user_id = int(payload)
     except ValueError:
-        story_id = 0
+        user_id = 0
 
-    # Удаляем из Supabase и очищаем буфер
-    if story_id != 0:
-        deleted = await delete_story_from_supabase(story_id)
-        print("Supabase delete (reject):", deleted)
-        if story_id in pending_stories:
-            del pending_stories[story_id]
-            print(f"Очищен буфер story_id={story_id}")
+    # Очищаем буфер пользователя
+    if user_id in user_stories:
+        del user_stories[user_id]
+        print(f"🗑️ БУФЕР ОЧИЩЕН (отклонено) для user_id={user_id}")
 
     full_text = call.message.caption or call.message.text or ""
 
     # Уведомляем автора
-    user_id = extract_user_id_from_moderation_text(full_text)
-    if user_id:
+    extracted_user_id = extract_user_id_from_moderation_text(full_text)
+    if extracted_user_id:
         try:
             await bot.send_message(
-                chat_id=user_id,
+                chat_id=extracted_user_id,
                 text=(
                     "Твоя история не прошла модерацию и не была опубликована.\n\n"
                     "Проверь, пожалуйста, чтобы не было политики, брани и оскорблений, "
@@ -568,6 +560,7 @@ async def cb_reject(call: CallbackQuery):
         except Exception as e:
             print("Cannot notify user:", e)
 
+    # Помечаем сообщение модерации
     current_text = call.message.caption or call.message.text or ""
     new_text = current_text + "\n\n❌ <b>Отклонено</b>"
     try:
@@ -585,7 +578,7 @@ async def main():
     print("🤖 Bot started polling...")
     print(f"📺 Канал ID: {CHANNEL_ID}")
     print(f"🛡️ Модерация ID: {MOD_CHAT_ID or 'НЕ ЗАДАН'}")
-    print(f"🔗 Склейка частей: ВКЛЮЧЕНА")
+    print(f"🔗 Склейка по USER_ID: ВКЛЮЧЕНА (макс {USER_BUFFER_SIZE} частей)")
     print("✅ ГОТОВ К РАБОТЕ!")
     await dp.start_polling(bot)
 
