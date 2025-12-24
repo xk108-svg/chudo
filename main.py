@@ -4,6 +4,7 @@ import time
 from typing import Optional, Dict, List
 from collections import defaultdict
 from datetime import datetime
+from asyncio import Lock
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -18,18 +19,23 @@ from aiogram.types import (
 import aiohttp
 
 
-# 🔥 СТРУКТУРА ДЛЯ ИСТОРИЙ
+# 🔥 СТРУКТУРА ДЛЯ ИСТОРИЙ С БЛОКИРОВКАМИ
 class UserStory:
     def __init__(self, user_id: int, username: str):
         self.user_id = user_id
         self.username = username
         self.messages: List[Dict] = []  # список сообщений
-        self.moderation_msg_id: Optional[int] = None  # ID кнопок в модерации
+        self.moderation_msg_id: Optional[int] = None
         self.timestamp = time.time()
-        self.task: Optional[asyncio.Task] = None  # задача отправки на модерацию
+        self.task: Optional[asyncio.Task] = None
+        self.lock = Lock()  # 🔥 Блокировка для этого пользователя
 
-user_stories: Dict[int, UserStory] = {}  # user_id -> UserStory
-last_story_time: Dict[int, float] = {}  # user_id -> время последней истории
+# 🔥 ГЛОБАЛЬНЫЕ БЛОКИРОВКИ
+user_stories: Dict[int, UserStory] = {}
+user_stories_lock = Lock()  # 🔥 Блокировка для словаря user_stories
+
+last_story_time: Dict[int, float] = {}
+last_story_lock = Lock()  # 🔥 Блокировка для словаря last_story_time
 
 
 # ---------- НАСТРОЙКИ ----------
@@ -46,7 +52,7 @@ CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
 COMMENTS_CHANNEL = "@comments_group_108"
 
 print("=" * 50)
-print("🤖 ЗАГРУЗКА БОТА")
+print("🤖 ЗАГРУЗКА БОТА С БЛОКИРОВКАМИ")
 print("=" * 50)
 
 if not BOT_TOKEN:
@@ -118,71 +124,83 @@ def channel_keyboard() -> InlineKeyboardMarkup:
 
 async def send_story_to_moderation(user_id: int):
     """Отправляет историю пользователя в модерацию одним блоком"""
-    if not MOD_CHAT_ID or user_id not in user_stories:
+    if not MOD_CHAT_ID:
         return
     
-    story = user_stories[user_id]
+    # 🔥 Безопасное получение истории
+    async with user_stories_lock:
+        if user_id not in user_stories:
+            return
+        story = user_stories[user_id]
     
-    if len(story.messages) == 0:
-        return
-    
-    print(f"📤 Отправка в модерацию: {len(story.messages)} сообщений от user_id={user_id}")
-    
-    try:
-        # Отправляем ВСЕ сообщения пользователя подряд
-        for msg_data in story.messages:
-            try:
-                if msg_data.get('photo'):
-                    await bot.send_photo(
-                        MOD_CHAT_ID,
-                        photo=msg_data['photo'],
-                        caption=msg_data.get('text', ''),
-                    )
-                else:
-                    await bot.send_message(
-                        MOD_CHAT_ID,
-                        msg_data['text'],
-                    )
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                print(f"⚠️ Ошибка отправки сообщения: {e}")
+    # 🔥 Блокировка для работы с конкретной историей
+    async with story.lock:
+        if len(story.messages) == 0:
+            return
         
-        # В КОНЦЕ блока отправляем кнопки модерации
-        footer_msg = await bot.send_message(
-            MOD_CHAT_ID,
-            f"┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅\n"
-            f"📨 История от @{story.username} (id {user_id})\n"
-            f"📊 Сообщений: {len(story.messages)}\n"
-            f"🕐 Время: {datetime.fromtimestamp(story.timestamp).strftime('%H:%M:%S')}",
-            reply_markup=moderation_keyboard(user_id)
-        )
+        print(f"📤 [{time.time():.3f}] Отправка в модерацию: {len(story.messages)} сообщений от user_id={user_id}")
         
-        story.moderation_msg_id = footer_msg.message_id
-        
-        print(f"✅ История user_id={user_id} отправлена в модерацию")
-        
-        # Отправляем уведомление пользователю
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="✅ История отправлена на модерацию. Ожидайте публикации в канале.",
+            # 🔥 УНИКАЛЬНЫЙ ID ДЛЯ КАЖДОГО БЛОКА
+            block_id = f"{user_id}_{int(time.time())}"
+            
+            # Отправляем ВСЕ сообщения пользователя подряд
+            for i, msg_data in enumerate(story.messages):
+                try:
+                    if msg_data.get('photo'):
+                        await bot.send_photo(
+                            MOD_CHAT_ID,
+                            photo=msg_data['photo'],
+                            caption=msg_data.get('text', ''),
+                        )
+                    else:
+                        await bot.send_message(
+                            MOD_CHAT_ID,
+                            msg_data['text'],
+                        )
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"⚠️ Ошибка отправки сообщения {i}: {e}")
+            
+            # В КОНЦЕ блока отправляем кнопки модерации
+            footer_msg = await bot.send_message(
+                MOD_CHAT_ID,
+                f"┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅\n"
+                f"📨 БЛОК #{block_id}\n"
+                f"👤 Автор: @{story.username} (id {user_id})\n"
+                f"📊 Сообщений: {len(story.messages)}\n"
+                f"🕐 Время: {datetime.fromtimestamp(story.timestamp).strftime('%H:%M:%S:%f')[:-3]}",
+                reply_markup=moderation_keyboard(user_id)
             )
-        except Exception:
-            pass
-        
-    except Exception as e:
-        print(f"❌ Ошибка отправки истории в модерацию: {e}")
+            
+            story.moderation_msg_id = footer_msg.message_id
+            
+            print(f"✅ [{time.time():.3f}] Блок #{block_id} отправлен в модерацию")
+            
+            # Отправляем уведомление пользователю
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="✅ История отправлена на модерацию. Ожидайте публикации в канале.",
+                )
+            except Exception:
+                pass
+            
+        except Exception as e:
+            print(f"❌ Ошибка отправки истории в модерацию: {e}")
 
 
 async def publish_to_channel(user_id: int):
     """Публикует историю в канал"""
-    if user_id not in user_stories:
-        return []
+    # 🔥 Безопасное получение истории
+    async with user_stories_lock:
+        if user_id not in user_stories:
+            return []
+        story = user_stories[user_id]
     
-    story = user_stories[user_id]
     published_ids = []
     
-    print(f"🚀 Публикация {len(story.messages)} сообщений от user_id={user_id}")
+    print(f"🚀 [{time.time():.3f}] Публикация {len(story.messages)} сообщений от user_id={user_id}")
     
     # Публикуем ВСЕ сообщения
     for i, msg_data in enumerate(story.messages):
@@ -228,9 +246,10 @@ async def publish_to_channel(user_id: int):
         except Exception as e:
             print(f"❌ Ошибка публикации: {e}")
     
-    # Удаляем историю из памяти
-    if user_id in user_stories:
-        del user_stories[user_id]
+    # 🔥 Безопасное удаление истории
+    async with user_stories_lock:
+        if user_id in user_stories:
+            del user_stories[user_id]
     
     # Уведомляем автора
     try:
@@ -293,95 +312,99 @@ async def cmd_ad(message: Message):
         pass
 
 
-# 🔥 ГЛАВНЫЙ ХЕНДЛЕР - ПРИЕМ СООБЩЕНИЙ
+# 🔥 ГЛАВНЫЙ ХЕНДЛЕР С БЛОКИРОВКАМИ
 @router.message(
     (F.photo & ~F.reply_to_message) | 
     (F.text & ~F.text.startswith(("/ad", "/start")))
 )
 async def handle_message(message: Message):
-    """Принимает сообщения от пользователей"""
+    """Принимает сообщения от пользователей с защитой от race conditions"""
     user = message.from_user
     user_id = user.id
     username = user.username or "anon"
-    
-    print(f"📨 Сообщение от {user_id} (@{username})")
-    
-    # ⚠️ ИСПРАВЛЕНО: Проверяем лимит времени (кроме админа)
-    # Но сбрасываем счетчик, если прошло достаточно времени
     now = time.time()
     
+    print(f"📨 [{now:.3f}] Сообщение от {user_id} (@{username})")
+    
+    # 🔥 БЕЗОПАСНАЯ ПРОВЕРКА ЛИМИТА ВРЕМЕНИ
     if user_id != ADMIN_USER_ID:
-        last_time = last_story_time.get(user_id)
-        
-        # Если прошло больше 1 часа с последней истории, сбрасываем счетчик
-        if last_time and now - last_time > 3600:  # 1 час
-            print(f"🔄 Сброс счетчика для user_id={user_id} (прошло >1 часа)")
-            last_story_time[user_id] = now
-            # Также очищаем историю, если она есть
-            if user_id in user_stories:
-                del user_stories[user_id]
-        
-        # Проверяем стандартный лимит (2 дня)
-        elif last_time and now - last_time < LIMIT_SECONDS:
-            hours_left = int((LIMIT_SECONDS - (now - last_time)) // 3600) + 1
-            await message.answer(
-                f"⏳ Ты уже отправлял историю недавно.\n"
-                f"Приходи с новой историей через примерно {hours_left} ч."
-            )
-            return
+        async with last_story_lock:
+            last_time = last_story_time.get(user_id)
+            
+            # Сброс счетчика через 1 час
+            if last_time and now - last_time > 3600:
+                print(f"🔄 Сброс счетчика для user_id={user_id}")
+                last_story_time[user_id] = now
+                
+                # 🔥 Безопасное удаление старой истории
+                async with user_stories_lock:
+                    if user_id in user_stories:
+                        del user_stories[user_id]
+            
+            # Проверка лимита (2 дня)
+            elif last_time and now - last_time < LIMIT_SECONDS:
+                hours_left = int((LIMIT_SECONDS - (now - last_time)) // 3600) + 1
+                await message.answer(
+                    f"⏳ Ты уже отправлял историю недавно.\n"
+                    f"Приходи с новой историей через примерно {hours_left} ч."
+                )
+                return
     
-    # ⚠️ ИСПРАВЛЕНО: ВСЕГДА создаем новую историю при первом сообщении
-    # или если прошло больше 5 минут с последнего сообщения
-    should_create_new = True
+    # 🔥 БЕЗОПАСНОЕ СОЗДАНИЕ/ПОЛУЧЕНИЕ ИСТОРИИ
+    async with user_stories_lock:
+        if user_id not in user_stories:
+            user_stories[user_id] = UserStory(user_id, username)
+            print(f"🆕 [{now:.3f}] Создана история для user_id={user_id}")
+            story = user_stories[user_id]
+        else:
+            story = user_stories[user_id]
     
-    if user_id in user_stories:
-        story = user_stories[user_id]
+    # 🔥 БЛОКИРОВКА ДЛЯ РАБОТЫ С КОНКРЕТНОЙ ИСТОРИЕЙ
+    async with story.lock:
+        # Проверяем, не прошло ли 5 минут с последнего сообщения
         time_since_last = now - story.timestamp
         
-        # Если прошло меньше 5 минут, продолжаем текущую историю
-        if time_since_last < 300:  # 5 минут
-            should_create_new = False
-        else:
-            # Прошло больше 5 минут - создаем новую историю
-            print(f"🆕 Новая история для user_id={user_id} (прошло >5 минут)")
-            # Старую историю отбрасываем
-            del user_stories[user_id]
-    
-    if should_create_new:
-        user_stories[user_id] = UserStory(user_id, username)
-        print(f"🆕 Создана новая история для user_id={user_id}")
-    
-    story = user_stories[user_id]
-    
-    # Добавляем сообщение в историю
-    msg_data = {
-        'text': message.caption or message.text or '',
-        'photo': message.photo[-1].file_id if message.photo else None,
-        'timestamp': time.time()
-    }
-    
-    story.messages.append(msg_data)
-    story.timestamp = now
-    
-    # ⚠️ ИСПРАВЛЕНО: УБИРАЕМ ЛИШНИЕ УВЕДОМЛЕНИЯ
-    # Не отправляем "Сообщение X принято" - это лишнее
-    
-    # Отменяем предыдущую задачу отправки, если она есть
-    if story.task and not story.task.done():
-        story.task.cancel()
-        print(f"🔄 Отменена предыдущая задача отправки для user_id={user_id}")
-    
-    # Запускаем новую задачу отправки на модерацию через 3 секунды
-    async def send_after_delay():
-        await asyncio.sleep(3)  # Ждем 3 секунды
-        if user_id in user_stories and user_stories[user_id] is story:
+        if time_since_last > 300:  # 5 минут
+            print(f"🔄 [{now:.3f}] Начинаем новую историю для user_id={user_id}")
+            story.messages = []  # Очищаем старые сообщения
+        
+        # Добавляем сообщение в историю
+        msg_data = {
+            'text': message.caption or message.text or '',
+            'photo': message.photo[-1].file_id if message.photo else None,
+            'timestamp': now
+        }
+        
+        story.messages.append(msg_data)
+        story.timestamp = now
+        
+        # Отменяем предыдущую задачу отправки, если она есть
+        if story.task and not story.task.done():
+            try:
+                story.task.cancel()
+                print(f"🔄 [{now:.3f}] Отменена задача для user_id={user_id}")
+            except:
+                pass
+        
+        # 🔥 ЗАПУСКАЕМ НОВУЮ ЗАДАЧУ С БЕЗОПАСНЫМ ДОСТУПОМ
+        async def send_after_delay():
+            await asyncio.sleep(3)  # Ждем 3 секунды
+            
+            # 🔥 ПРОВЕРЯЕМ, ЧТО ИСТОРИЯ ВСЕ ЕЩЕ СУЩЕСТВУЕТ
+            async with user_stories_lock:
+                if user_id not in user_stories or user_stories[user_id] is not story:
+                    return
+            
+            # 🔥 ОТПРАВЛЯЕМ В МОДЕРАЦИЮ С БЛОКИРОВКОЙ
             await send_story_to_moderation(user_id)
-            # Обновляем время последней истории
+            
+            # 🔥 ОБНОВЛЯЕМ ВРЕМЯ ПОСЛЕДНЕЙ ИСТОРИИ
             if user_id != ADMIN_USER_ID:
-                last_story_time[user_id] = time.time()
-    
-    story.task = asyncio.create_task(send_after_delay())
-    print(f"⏰ Запланирована отправка истории user_id={user_id} через 3 секунды")
+                async with last_story_lock:
+                    last_story_time[user_id] = time.time()
+        
+        story.task = asyncio.create_task(send_after_delay())
+        print(f"⏰ [{now:.3f}] Запланирована отправка истории user_id={user_id}")
 
 
 # ---------- ОБРАБОТЧИКИ МОДЕРАЦИИ ----------
@@ -396,7 +419,7 @@ async def cb_publish(call: CallbackQuery):
     except:
         return
     
-    print(f"✅ Одобрена история от user_id={user_id}")
+    print(f"✅ [{time.time():.3f}] Одобрена история от user_id={user_id}")
     
     # Публикуем в канал
     message_ids = await publish_to_channel(user_id)
@@ -426,11 +449,12 @@ async def cb_reject(call: CallbackQuery):
     except:
         return
     
-    print(f"❌ Отклонена история от user_id={user_id}")
+    print(f"❌ [{time.time():.3f}] Отклонена история от user_id={user_id}")
     
-    # Удаляем историю из памяти
-    if user_id in user_stories:
-        del user_stories[user_id]
+    # 🔥 БЕЗОПАСНОЕ УДАЛЕНИЕ ИСТОРИИ
+    async with user_stories_lock:
+        if user_id in user_stories:
+            del user_stories[user_id]
     
     # Помечаем в модерации
     current_text = call.message.text or ""
@@ -462,14 +486,15 @@ async def cb_reject(call: CallbackQuery):
 # ---------- ЗАПУСК ----------
 
 async def main():
-    print("🤖 БОТ ЗАПУЩЕН")
+    print("🤖 БОТ ЗАПУЩЕН С БЛОКИРОВКАМИ")
     print("=" * 50)
-    print("📝 ЛОГИКА РАБОТЫ:")
-    print("1. Пользователь пишет сообщения")
-    print("2. После 3 секунд тишины - отправка в модерацию")
-    print("3. НЕТ лишних сообщений 'Сообщение X принято'")
-    print("4. Счетчик сбрасывается через 1 час неактивности")
-    print("5. Новая история через 5 минут тишины")
+    print("🛡️  ЗАЩИТА ОТ RACE CONDITIONS:")
+    print("1. Глобальные блокировки для словарей")
+    print("2. Локальные блокировки для каждой истории")
+    print("3. Уникальные ID для каждого блока")
+    print("4. Миллисекундные таймстемпы")
+    print("=" * 50)
+    print("✅ ГОТОВ К МНОГОПОЛЬЗОВАТЕЛЬСКОЙ РАБОТЕ")
     print("=" * 50)
     
     try:
