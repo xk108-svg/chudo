@@ -20,15 +20,12 @@ from aiogram.types import (
 import aiohttp
 
 
-# 🔥 ГЛОБАЛЬНЫЙ БУФЕР ДЛЯ ЧАСТЕЙ ИСТОРИЙ
+# 🔥 ГЛОБАЛЬНЫЕ БУФЕРЫ
 user_stories: Dict[int, List[Dict]] = {}
 USER_BUFFER_SIZE = 10  # увеличиваем для длинных историй
 
-# 🔥 СЛОВАРЬ ДЛЯ ОТСЛЕЖИВАНИЯ ИСТОРИЙ В МОДЕРАЦИИ
-# user_id -> {story_index: message_id_in_moderation}
+# 🔥 ОТСЛЕЖИВАНИЕ СООБЩЕНИЙ В МОДЕРАЦИИ
 moderation_messages: Dict[int, Dict[int, int]] = defaultdict(dict)
-# user_id -> список ID сообщений в канале (для публикации)
-pending_publication: Dict[int, List[Dict]] = defaultdict(list)
 
 
 # ---------- НАСТРОЙКИ ПРОЕКТА ----------
@@ -44,6 +41,7 @@ last_story_ts: Dict[int, float] = {}
 
 @dataclass
 class StoryPart:
+    id: Optional[int]
     index: int  # номер части (1, 2, 3...)
     user_id: int
     username: str
@@ -219,45 +217,55 @@ def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
         return None
 
 
-async def send_part_to_moderation(part: StoryPart, is_first: bool = False):
+async def send_part_to_moderation(part_data: dict, is_first: bool = False):
     """Отправляет часть истории в чат модерации"""
     if not MOD_CHAT_ID:
+        print("❌ MOD_CHAT_ID не задан, модерация невозможна")
         return None
     
-    user_id = part.user_id
-    index = part.index
+    user_id = part_data['user_id']
+    index = part_data['index']
+    text = part_data['text']
+    username = part_data['username']
+    photo_file_id = part_data.get('photo')
+    timestamp = part_data['timestamp']
     
     header = (
-        f"📝 Часть {index} из {len(user_stories.get(user_id, []))}\n"
-        f"Автор: @{part.username} (id {user_id})\n"
-        f"Время: {datetime.fromtimestamp(part.timestamp).strftime('%H:%M:%S')}\n"
+        f"📝 Часть {index}\n"
+        f"Автор: @{username} (id {user_id})\n"
+        f"Время: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}\n"
     )
     
     if is_first:
         header += "🆕 НАЧАЛО НОВОЙ ИСТОРИИ\n\n"
     
-    full_text = header + part.text
+    full_text = header + (text if text else "")
     
     try:
-        if part.photo_file_id:
+        print(f"🔄 Отправка в модерацию: user_id={user_id}, часть={index}, фото={'есть' if photo_file_id else 'нет'}")
+        
+        if photo_file_id:
             msg = await bot.send_photo(
                 MOD_CHAT_ID,
-                photo=part.photo_file_id,
-                caption=full_text,
-                reply_markup=moderation_keyboard(user_id, part.index),
+                photo=photo_file_id,
+                caption=full_text if text else header,
+                reply_markup=moderation_keyboard(user_id, index),
+                parse_mode=ParseMode.HTML,
             )
         else:
             msg = await bot.send_message(
                 MOD_CHAT_ID,
                 full_text,
-                reply_markup=moderation_keyboard(user_id, part.index),
+                reply_markup=moderation_keyboard(user_id, index),
+                parse_mode=ParseMode.HTML,
             )
         
         # Сохраняем ID сообщения в модерации
+        if user_id not in moderation_messages:
+            moderation_messages[user_id] = {}
         moderation_messages[user_id][index] = msg.message_id
-        part.message_id = msg.message_id
         
-        print(f"✅ Отправлена в модерацию часть {index} от user_id={user_id}")
+        print(f"✅ Отправлена в модерацию часть {index} от user_id={user_id}, msg_id={msg.message_id}")
         return msg.message_id
         
     except Exception as e:
@@ -278,6 +286,8 @@ async def publish_all_parts(user_id: int):
     # Сортируем части по индексу
     sorted_parts = sorted(parts, key=lambda x: x.get('index', 0))
     
+    print(f"🚀 Публикация {len(sorted_parts)} частей от user_id={user_id}")
+    
     published_count = 0
     for part in sorted_parts:
         try:
@@ -285,9 +295,10 @@ async def publish_all_parts(user_id: int):
             photo_file_id = part.get('photo')
             
             # Добавляем номер части в начало
-            part_header = f"Часть {part['index']}\n\n" if len(sorted_parts) > 1 else ""
+            part_header = f"<b>Часть {part['index']}</b>\n\n" if len(sorted_parts) > 1 else ""
             full_text = part_header + text
             
+            # Кнопку добавляем только к последней части
             kb = share_your_story_keyboard() if part['index'] == len(sorted_parts) else None
             
             if photo_file_id:
@@ -296,12 +307,14 @@ async def publish_all_parts(user_id: int):
                     photo=photo_file_id,
                     caption=full_text if text else None,
                     reply_markup=kb,
+                    parse_mode=ParseMode.HTML,
                 )
             else:
                 await bot.send_message(
                     CHANNEL_ID,
                     full_text,
                     reply_markup=kb,
+                    parse_mode=ParseMode.HTML,
                 )
             
             published_count += 1
@@ -405,6 +418,7 @@ async def cmd_ad(message: Message):
                     url="https://t.me/pishiistorii_bot"
                 )]
             ]),
+            parse_mode=ParseMode.HTML,
         )
         
         try:
@@ -435,6 +449,7 @@ async def cmd_ad(message: Message):
                 url="https://t.me/pishiistorii_bot"
             )]
         ]),
+        parse_mode=ParseMode.HTML,
     )
     
     try:
@@ -461,11 +476,19 @@ async def handle_story(message: Message):
     ✅ Каждая часть сразу идет в модерацию
     ✅ При одобрении последней части - всё публикуется
     """
-    print(f"📨 Получено сообщение от {message.from_user.id}")
-    
     user = message.from_user
     user_id = user.id
+    username = user.username or "anon"
+    
+    print(f"📨 Получено сообщение от {user_id} (@{username})")
+    print(f"📊 Тип: {'фото' if message.photo else 'текст'}, "
+          f"Длина текста: {len(message.caption or message.text or '')}")
 
+    # Получаем данные из сообщения
+    text = message.caption or message.text or ""
+    has_photo = message.photo is not None
+    photo_file_id = message.photo[-1].file_id if has_photo else None
+    
     # Ограничение по времени для обычных пользователей
     if user.id != ADMIN_USER_ID:
         now = time.time()
@@ -478,8 +501,10 @@ async def handle_story(message: Message):
             last_part_time = user_stories[user_id][-1].get('timestamp', 0)
             if now - last_part_time > 300:  # 5 минут
                 is_new_story = True
+                print(f"🆕 Новая история для user_id={user_id} (прошло >5 минут)")
                 # Очищаем старые части
-                del user_stories[user_id]
+                if user_id in user_stories:
+                    del user_stories[user_id]
                 if user_id in moderation_messages:
                     del moderation_messages[user_id]
         
@@ -494,11 +519,6 @@ async def handle_story(message: Message):
         if is_new_story:
             last_story_ts[user_id] = now
 
-    # Получаем данные из сообщения
-    text = message.caption or message.text or ""
-    has_photo = message.photo is not None
-    photo_file_id = message.photo[-1].file_id if has_photo else None
-    
     # Инициализируем буфер для пользователя
     if user_id not in user_stories:
         user_stories[user_id] = []
@@ -511,22 +531,38 @@ async def handle_story(message: Message):
         'index': part_index,
         'text': text,
         'photo': photo_file_id,
-        'username': user.username or "anon",
+        'username': username,
+        'user_id': user_id,
         'timestamp': time.time(),
         'status': 'pending',
         'type': 'photo' if has_photo else 'text'
     }
     user_stories[user_id].append(story_part)
     
+    print(f"📚 Сохранена часть {part_index} от user_id={user_id}")
+    
     # Отправляем в модерацию
     moderation_msg_id = await send_part_to_moderation(
-        StoryPart(**story_part),
+        story_part,
         is_first=(part_index == 1)
     )
     
     # Сохраняем в Supabase
     if SUPABASE_ENABLED:
-        await save_story_part_to_supabase(StoryPart(**story_part))
+        # Создаем объект StoryPart для базы данных
+        part_obj = StoryPart(
+            id=None,
+            index=part_index,
+            user_id=user_id,
+            username=username,
+            text=text,
+            status='pending',
+            type='photo' if has_photo else 'text',
+            photo_file_id=photo_file_id,
+            message_id=moderation_msg_id,
+            timestamp=time.time()
+        )
+        await save_story_part_to_supabase(part_obj)
     
     # Уведомляем пользователя
     if part_index == 1:
@@ -541,7 +577,7 @@ async def handle_story(message: Message):
             f"Всего частей: {part_index}"
         )
     
-    print(f"📚 User {user_id}: сохранена часть {part_index}, всего {len(user_stories[user_id])} частей")
+    print(f"📚 User {user_id}: всего частей {len(user_stories[user_id])}")
 
 
 # 🔥 ОДОБРЕНИЕ ОТДЕЛЬНОЙ ЧАСТИ
@@ -564,6 +600,7 @@ async def cb_approve_part(call: CallbackQuery):
         for part in user_stories[user_id]:
             if part.get('index') == part_index:
                 part['status'] = 'approved'
+                print(f"📊 Статус части {part_index} обновлен на 'approved'")
                 break
     
     # Помечаем в модерации
@@ -572,18 +609,23 @@ async def cb_approve_part(call: CallbackQuery):
     
     try:
         if call.message.photo:
-            await call.message.edit_caption(new_text)
+            await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
         else:
-            await call.message.edit_text(new_text)
+            await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         print(f"Ошибка редактирования: {e}")
     
     # Проверяем, все ли части одобрены
-    if user_id in user_stories:
+    if user_id in user_stories and user_stories[user_id]:
         all_approved = all(part.get('status') == 'approved' for part in user_stories[user_id])
+        total_parts = len(user_stories[user_id])
+        approved_parts = sum(1 for part in user_stories[user_id] if part.get('status') == 'approved')
+        
+        print(f"📊 Проверка одобрения: {approved_parts}/{total_parts} частей одобрено")
+        
         if all_approved:
             await call.message.answer(
-                f"🎉 Все части истории от user_id={user_id} одобрены!\n"
+                f"🎉 Все {total_parts} части истории от user_id={user_id} одобрены!\n"
                 f"Нажмите '🚀 Опубликовать всё' для публикации."
             )
 
@@ -616,9 +658,9 @@ async def cb_reject_part(call: CallbackQuery):
     
     try:
         if call.message.photo:
-            await call.message.edit_caption(new_text)
+            await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
         else:
-            await call.message.edit_text(new_text)
+            await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         print(f"Ошибка редактирования: {e}")
     
@@ -651,7 +693,8 @@ async def cb_show_parts(call: CallbackQuery):
     parts_info = []
     for part in user_stories[user_id]:
         status = "✅" if part.get('status') == 'approved' else "⏳"
-        parts_info.append(f"{status} Часть {part['index']}: {len(part['text'])} символов")
+        text_preview = part['text'][:50] + "..." if len(part['text']) > 50 else part['text']
+        parts_info.append(f"{status} Часть {part['index']}: {text_preview}")
     
     summary = f"📚 Все части от user_id={user_id}:\n\n" + "\n".join(parts_info)
     await call.message.answer(summary)
@@ -678,9 +721,9 @@ async def cb_publish_all(call: CallbackQuery):
         
         try:
             if call.message.photo:
-                await call.message.edit_caption(new_text)
+                await call.message.edit_caption(new_text, parse_mode=ParseMode.HTML)
             else:
-                await call.message.edit_text(new_text)
+                await call.message.edit_text(new_text, parse_mode=ParseMode.HTML)
         except Exception as e:
             print(f"Ошибка редактирования: {e}")
         
