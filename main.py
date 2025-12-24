@@ -269,7 +269,7 @@ async def cmd_start(message: Message):
 
 @router.message(F.text.startswith("/ad "))
 async def cmd_ad(message: Message):
-    """Реклама (только для админа)"""
+    """Реклама (только для админа) - БЕЗ реакций и кнопок"""
     if message.from_user.id != ADMIN_USER_ID:
         return
     
@@ -278,26 +278,21 @@ async def cmd_ad(message: Message):
         await message.answer("❌ Напиши текст рекламы")
         return
     
-    # Реклама публикуется как обычное сообщение + отдельное с реакциями
+    # ✅ Реклама публикуется ПРОСТО как текст, без реакций и кнопок
     if message.reply_to_message and message.reply_to_message.photo:
         photo = message.reply_to_message.photo[-1].file_id
         await bot.send_photo(
             CHANNEL_ID,
             photo=photo,
             caption=f"📢 <b>Реклама</b>\n\n{ad_text}",
+            parse_mode=ParseMode.HTML,
         )
     else:
         await bot.send_message(
             CHANNEL_ID,
             f"📢 <b>Реклама</b>\n\n{ad_text}",
+            parse_mode=ParseMode.HTML,
         )
-    
-    # Отдельное сообщение с реакциями
-    await bot.send_message(
-        CHANNEL_ID,
-        "🙏 ❤️ 👍 ✨ 🙌",
-        reply_markup=channel_keyboard(),  # ОДНА кнопка
-    )
     
     await message.answer("✅ Реклама опубликована")
     try:
@@ -486,7 +481,8 @@ async def main():
     print("1. Сообщения публикуются как в модерации")
     print("2. После последнего сообщения - отдельное сообщение с реакциями 🙏 ❤️ 👍 ✨ 🙌")
     print("3. Под реакциями - ТОЛЬКО ОДНА кнопка: ✍️ Поделись своей историей")
-    print("4. Защита от race conditions")
+    print("4. Реклама (/ad) - БЕЗ реакций и кнопок")
+    print("5. Защита от race conditions")
     print("=" * 50)
     print("✅ ГОТОВ К РАБОТЕ")
     print("=" * 50)
