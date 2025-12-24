@@ -69,7 +69,7 @@ else:
     print("⚠️ MOD_CHAT_ID не задан — модерация отключена")
 
 print(f"📺 Канал: {CHANNEL_ID}")
-print(f"💬 Обсуждения: {COMMENTS_CHANNEL}")
+print(f"💬 Комментарии: {COMMENTS_CHANNEL}")
 print("=" * 50)
 
 
@@ -105,16 +105,12 @@ def moderation_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def channel_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура под постом в канале"""
+    """Клавиатура под постом в канале - ТОЛЬКО одна кнопка"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💬 Обсудить",
-                    url=f"https://t.me/comments_group_108"
-                ),
-                InlineKeyboardButton(
-                    text="✍️ Поделись историей",
+                    text="✍️ Поделись своей историей",
                     url="https://t.me/pishiistorii_bot"
                 )
             ]
@@ -219,13 +215,13 @@ async def publish_to_channel(user_id: int):
                         CHANNEL_ID,
                         photo=photo,
                         caption=full_text if full_text.strip() else None,
-                        reply_markup=channel_keyboard(),
+                        reply_markup=channel_keyboard(),  # ✅ Одна кнопка
                     )
                 else:
                     msg = await bot.send_message(
                         CHANNEL_ID,
                         full_text,
-                        reply_markup=channel_keyboard(),
+                        reply_markup=channel_keyboard(),  # ✅ Одна кнопка
                     )
             else:
                 if photo:
@@ -296,13 +292,13 @@ async def cmd_ad(message: Message):
             CHANNEL_ID,
             photo=photo,
             caption=f"📢 <b>Реклама</b>\n\n{ad_text}{reactions}",
-            reply_markup=channel_keyboard(),
+            reply_markup=channel_keyboard(),  # ✅ Одна кнопка
         )
     else:
         await bot.send_message(
             CHANNEL_ID,
             f"📢 <b>Реклама</b>\n\n{ad_text}{reactions}",
-            reply_markup=channel_keyboard(),
+            reply_markup=channel_keyboard(),  # ✅ Одна кнопка
         )
     
     await message.answer("✅ Реклама опубликована")
@@ -486,15 +482,15 @@ async def cb_reject(call: CallbackQuery):
 # ---------- ЗАПУСК ----------
 
 async def main():
-    print("🤖 БОТ ЗАПУЩЕН С БЛОКИРОВКАМИ")
+    print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 50)
-    print("🛡️  ЗАЩИТА ОТ RACE CONDITIONS:")
-    print("1. Глобальные блокировки для словарей")
-    print("2. Локальные блокировки для каждой истории")
-    print("3. Уникальные ID для каждого блока")
-    print("4. Миллисекундные таймстемпы")
+    print("📝 ОСОБЕННОСТИ:")
+    print("1. Только одна кнопка под постом: ✍️ Поделись своей историей")
+    print("2. Реакции 🙏 ❤️ 👍 ✨ 🙌 после каждого поста")
+    print("3. Для длинных сообщений - реакции только под последней частью")
+    print("4. Защита от race conditions")
     print("=" * 50)
-    print("✅ ГОТОВ К МНОГОПОЛЬЗОВАТЕЛЬСКОЙ РАБОТЕ")
+    print("✅ ГОТОВ К РАБОТЕ")
     print("=" * 50)
     
     try:
