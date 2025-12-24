@@ -16,9 +16,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    KeyboardButton,
 )
 import aiohttp
 
@@ -75,25 +73,36 @@ CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-print("ENV BOT_TOKEN:", bool(BOT_TOKEN))
-print("ENV MOD_CHAT_ID:", MOD_CHAT_ID_RAW)
-print("ENV CHANNEL_ID:", CHANNEL_ID_RAW)
-print("ENV SUPABASE_URL:", SUPABASE_URL)
-print("ENV SUPABASE_KEY set:", bool(SUPABASE_KEY))
+print("=" * 50)
+print("🤖 ЗАГРУЗКА БОТА")
+print("=" * 50)
+print("ENV BOT_TOKEN:", "✅ ЗАДАН" if BOT_TOKEN else "❌ НЕ ЗАДАН")
+print("ENV MOD_CHAT_ID:", MOD_CHAT_ID_RAW if MOD_CHAT_ID_RAW else "❌ НЕ ЗАДАН")
+print("ENV CHANNEL_ID:", CHANNEL_ID_RAW if CHANNEL_ID_RAW else "❌ НЕ ЗАДАН")
+print("ENV SUPABASE_URL:", "✅ ЗАДАН" if SUPABASE_URL else "❌ НЕ ЗАДАН")
+print("ENV SUPABASE_KEY:", "✅ ЗАДАН" if SUPABASE_KEY else "❌ НЕ ЗАДАН")
+print("=" * 50)
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не задан")
+    raise ValueError("❌ BOT_TOKEN не задан! Установите переменную окружения BOT_TOKEN")
 
 if not CHANNEL_ID_RAW:
-    raise ValueError("CHANNEL_ID не задан")
+    raise ValueError("❌ CHANNEL_ID не задан! Установите переменную окружения CHANNEL_ID")
 
-CHANNEL_ID = int(CHANNEL_ID_RAW)
+try:
+    CHANNEL_ID = int(CHANNEL_ID_RAW)
+except ValueError:
+    raise ValueError(f"❌ Неверный формат CHANNEL_ID: {CHANNEL_ID_RAW}")
 
 if MOD_CHAT_ID_RAW:
-    MOD_CHAT_ID = int(MOD_CHAT_ID_RAW)
+    try:
+        MOD_CHAT_ID = int(MOD_CHAT_ID_RAW)
+    except ValueError:
+        print(f"⚠️ Неверный формат MOD_CHAT_ID: {MOD_CHAT_ID_RAW}")
+        MOD_CHAT_ID = None
 else:
     MOD_CHAT_ID = None
-    print("WARNING: MOD_CHAT_ID не задан — модерация в чат отключена")
+    print("⚠️ MOD_CHAT_ID не задан — модерация в чат отключена")
 
 SUPABASE_ENABLED = bool(SUPABASE_URL and SUPABASE_KEY)
 
@@ -206,7 +215,7 @@ async def update_post_with_rating(channel_message_id: int):
                 await message.edit_text(new_text, reply_markup=rating_keyboard(channel_message_id))
                 
         except Exception as e:
-            print(f"Ошибка обновления рейтинга: {e}")
+            print(f"❌ Ошибка обновления рейтинга: {e}")
 
 
 async def send_comment_notification(channel_message_id: int, user_id: int, comment: str, username: str):
@@ -224,7 +233,7 @@ async def send_comment_notification(channel_message_id: int, user_id: int, comme
             
             await bot.send_message(MOD_CHAT_ID, notification)
         except Exception as e:
-            print(f"Ошибка отправки уведомления о комментарии: {e}")
+            print(f"❌ Ошибка отправки уведомления о комментарии: {e}")
 
 
 # ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ SUPABASE ----------
@@ -256,7 +265,7 @@ async def supabase_request(
             except Exception:
                 data = await resp.text()
             if resp.status >= 400:
-                print(f"Supabase error {resp.status}: {data}")
+                print(f"❌ Supabase error {resp.status}: {data}")
                 return None
             return data
 
@@ -283,7 +292,7 @@ async def save_story_part_to_supabase(part: StoryPart) -> Optional[int]:
     try:
         return data[0]["id"]
     except Exception as e:
-        print("Parse Supabase insert response error:", e, data)
+        print(f"❌ Parse Supabase insert response error:", e, data)
         return None
 
 
@@ -401,7 +410,7 @@ async def send_part_to_moderation(part_data: dict, is_first: bool = False):
         return msg.message_id
         
     except Exception as e:
-        print(f"❌ Ошибка отправки в модерации: {e}")
+        print(f"❌ Ошибка отправки в модерацию: {e}")
         return None
 
 
@@ -439,7 +448,7 @@ async def publish_single_post(text: str, photo_file_id: Optional[str], username:
             else:
                 await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
         except Exception as e:
-            print(f"Ошибка обновления клавиатуры: {e}")
+            print(f"⚠️ Ошибка обновления клавиатуры: {e}")
         
         print(f"✅ Опубликован одиночный пост от user_id={user_id}, message_id={msg.message_id}")
         return msg.message_id
@@ -530,11 +539,11 @@ async def publish_all_parts(user_id: int) -> List[int]:
                     else:
                         await msg.edit_reply_markup(reply_markup=rating_keyboard(msg.message_id))
                 except Exception as e:
-                    print(f"Ошибка обновления клавиатуры: {e}")
+                    print(f"⚠️ Ошибка обновления клавиатуры: {e}")
             
             print(f"✅ Опубликована часть {part['index']}, message_id={msg.message_id}")
             
-            if published_message_ids < len(sorted_parts):
+            if len(published_message_ids) < len(sorted_parts):
                 await asyncio.sleep(0.5)
                 
         except Exception as e:
@@ -839,7 +848,7 @@ async def cmd_ad(message: Message):
         try:
             await confirm.delete()
         except:
-        pass
+            pass
         return
 
     ad_text = message.text[4:].strip()
@@ -1263,13 +1272,33 @@ def extract_user_id_from_moderation_text(text: str) -> Optional[int]:
 # ---------- ЗАПУСК ----------
 
 async def main():
-    print("🤖 Bot started polling...")
+    print("=" * 50)
+    print("🤖 БОТ ЗАПУЩЕН")
+    print("=" * 50)
     print(f"📺 Канал ID: {CHANNEL_ID}")
     print(f"🛡️ Модерация ID: {MOD_CHAT_ID or 'НЕ ЗАДАН'}")
     print(f"⭐ Система оценок и комментариев: ВКЛЮЧЕНА")
+    print(f"⚙️ Supabase: {'✅ ВКЛЮЧЕН' if SUPABASE_ENABLED else '❌ ОТКЛЮЧЕН'}")
+    print("=" * 50)
     print("✅ ГОТОВ К РАБОТЕ!")
-    await dp.start_polling(bot)
+    print("=" * 50)
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        print("=" * 50)
+        print("🛠️ ПРОВЕРЬТЕ:")
+        print("1. Переменные окружения (BOT_TOKEN, CHANNEL_ID)")
+        print("2. Интернет-соединение")
+        print("3. Права бота (должен быть администратором в канале)")
+        print("=" * 50)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен пользователем")
+    except Exception as e:
+        print(f"\n❌ Неожиданная ошибка: {e}")
